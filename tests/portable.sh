@@ -132,6 +132,14 @@ test_plist_read_error_on_stdout_is_not_taken_for_a_value() {
   assert_contains "$(mac_secure status --json)" '"root_job":"current"'
 }
 
+test_plist_values_are_read_only_through_the_two_wrappers() {
+  local reads wrappers
+  reads=$(cd "$REPO" && grep -rn 'plutil -extract' bin jobs lib root | cut -d: -f1 | sort | tr '\n' ' ')
+  assert_eq "lib/status.sh root/macos-update " "$reads" "files reading plists directly"
+  wrappers=$(sed -n 's/.*value=\$(\(plutil -extract.*\)$/\1/p' "$REPO/lib/status.sh" "$REPO/root/macos-update" | sort -u | wc -l | tr -d ' ')
+  assert_eq 1 "$wrappers" "the two wrappers should read the same way"
+}
+
 test_status_shows_root_module_results() {
   printf '2026-01-01 03:00\tmacos\tok\t0\tinstalling\n2026-01-01 03:05\tmacos\tfailed\t0\tsee log\n' >"$MS_ROOT_RESULTS"
   local out

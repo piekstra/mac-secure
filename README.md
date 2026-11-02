@@ -121,7 +121,7 @@ Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes 
 
 `make verify` runs what CI runs: `shellcheck`, `actionlint`, and `tests/run.sh`. The tests are plain shell, with stubs on `PATH` for every tool that changes a system. Scripts must run under the macOS `/bin/bash`, which is version 3.2.
 
-Pull requests run on Linux only. The macOS job runs on `main` and on manual runs. When hosted macOS arm64 runners have no capacity, the job is cancelled after 15 minutes with no steps run; a manual run can pick another runner: `gh workflow run ci --ref <branch> -f macos-runner=macos-15-intel`.
+Pull requests run on Linux only. The macOS job runs on `main` and on manual runs. When hosted macOS arm64 runners have no capacity, GitHub cancels the job with no steps run and the annotation "The job was not acquired by Runner". A manual run can pick another runner: `gh workflow run ci --ref <branch> -f macos-runner=macos-15-intel`.
 
 ## Coverage gaps
 
