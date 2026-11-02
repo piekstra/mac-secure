@@ -1,0 +1,4 @@
+Software Update Tool
+
+Downloading macOS Tahoe 26.7.2
+Not enough free disk space to complete the download.

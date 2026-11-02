@@ -1,0 +1,8 @@
+Package "installer.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Certificate Chain:
+    1. Developer ID Installer: Someone Else, Inc. (ZZZZZ99999)
+       SHA256 Fingerprint:
+           44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44
+       ------------------------------------------------------------------------
+    2. Developer ID Installer: Example Vendor, Inc. (ABCDE12345)

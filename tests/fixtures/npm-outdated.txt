@@ -1,0 +1,2 @@
+/opt/homebrew/lib/node_modules/@example/tool:@example/tool@2.0.0:@example/tool@1.0.0:@example/tool@2.0.0:global
+/opt/homebrew/lib/node_modules/plain:plain@3.1.0:plain@3.0.0:plain@3.1.0:global

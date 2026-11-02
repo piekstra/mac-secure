@@ -1,0 +1,12 @@
+# Copy the lines you want to ~/.config/mac-secure/vendor-installers.txt, then run:
+#   mac-secure enable vendor-installers
+#
+# Format: Homebrew cask token|Apple Team ID that signs the vendor's installer
+# Read a Team ID from a downloaded installer with: pkgutil --check-signature installer.pkg
+#
+# An installer runs only if its sha256 matches Homebrew's published value (when one is published),
+# it is signed by this exact team, and Gatekeeper accepts it. A vendor changing its signing team
+# stops that installer until you review the change and update the pin.
+dotnet-sdk|UBF8T346G9
+microsoft-teams|UBF8T346G9
+zoom|BJ4HAAB9B3

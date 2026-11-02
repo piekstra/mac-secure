@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker://rhysd/actionlint:1.7.12
+      - run: make verify
+
+  # macOS runners cost about 10 times as much, so this covers only the BSD tool usage in tests/macos.sh
+  # and skips pull requests. Those run tests/portable.sh alone until they reach main.
+  macos-smoke:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: /bin/bash tests/run.sh
+      - run: ./bin/mac-secure status
+      - run: ./bin/mac-secure audit

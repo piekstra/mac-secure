@@ -1,0 +1,540 @@
+#!/bin/bash
+# Daily updater for everything that does not need root.
+# Usage: daily [module ...]   (no arguments runs the enabled modules)
+#
+# Exit status of a module function: 0 ok, 75 deferred (retried next run), anything else failed.
+
+set -u
+umask 022
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/common.sh
+. "$ROOT/lib/common.sh"
+# shellcheck source=lib/modules.sh
+. "$ROOT/lib/modules.sh"
+
+PATH=$(ms_tool_path)
+export PATH
+# Interpreters and build tools load code from the current directory.
+cd / || exit 1
+export HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_ANALYTICS=1 NONINTERACTIVE=1 GIT_TERMINAL_PROMPT=0
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1 CARGO_TERM_COLOR=never NO_COLOR=1
+
+mkdir -p "$MS_STATE_DIR/runs" "$MS_LOG_DIR" "$MS_CONFIG_DIR"
+STAMP=$(date +%Y-%m-%dT%H%M%S)
+RUN_LOG="$MS_LOG_DIR/$STAMP.log"
+RUN_TSV="$MS_STATE_DIR/runs/$STAMP.tsv"
+DETAIL_FILE=$(mktemp "${TMPDIR:-/tmp}/mac-secure-detail.XXXXXX")
+
+MIN_FREE_GIB=$(ms_config_int MIN_FREE_GIB 15)
+HARD_MIN_FREE_GIB=$(ms_config_int HARD_MIN_FREE_GIB 6)
+
+LOCK="$MS_STATE_DIR/run.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  old=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+    echo "already running as pid $old" >&2
+    exit 0
+  fi
+  rm -rf "$LOCK"
+  mkdir "$LOCK"
+fi
+echo $$ >"$LOCK/pid"
+trap 'rm -rf "$LOCK" "$DETAIL_FILE"' EXIT
+
+log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >>"$RUN_LOG"; }
+detail() { printf '%s' "$*" >"$DETAIL_FILE"; }
+
+clear_caches() {
+  command -v brew >/dev/null 2>&1 && brew cleanup -s --prune=all
+  command -v npm >/dev/null 2>&1 && npm cache clean --force
+  command -v bun >/dev/null 2>&1 && bun pm cache rm
+  command -v uv >/dev/null 2>&1 && uv cache prune
+  return 0
+}
+
+ensure_space() {
+  [ "$(ms_free_gib)" -ge "$MIN_FREE_GIB" ] && return 0
+  echo "free space is $(ms_free_gib) GiB; clearing caches"
+  clear_caches
+  [ "$(ms_free_gib)" -ge "$HARD_MIN_FREE_GIB" ]
+}
+
+ch_disk() {
+  ensure_space
+  local rc=$?
+  detail "$(ms_free_gib) GiB free"
+  [ $rc -eq 0 ] || return 75
+}
+
+# A pinned formula stays outdated by the user's choice.
+outdated_unpinned() {
+  brew outdated --formula --quiet | grep -vxFf <(brew list --pinned)
+}
+
+ch_brew_formulae() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  brew update || return 1
+  local before after rc
+  before=$(outdated_unpinned | wc -l | tr -d ' ')
+  brew upgrade --formula
+  rc=$?
+  after=$(outdated_unpinned | wc -l | tr -d ' ')
+  detail "$before outdated before, $after after; pinned: $(brew list --pinned | wc -l | tr -d ' ')"
+  brew cleanup --prune=all
+  [ $rc -eq 0 ] && [ "$after" -eq 0 ]
+}
+
+# Gatekeeper's first-launch dialog would otherwise wait on a click, so run the same assessment
+# here (signature and notarization) and drop quarantine only when it passes.
+clear_quarantine_if_trusted() {
+  local app=$1
+  [ -d "$app" ] || return 0
+  xattr -p com.apple.quarantine "$app" >/dev/null 2>&1 || return 0
+  if spctl --assess --type execute "$app" 2>/dev/null; then
+    xattr -dr com.apple.quarantine "$app"
+  else
+    echo "Gatekeeper rejected $app; leaving quarantine in place"
+    return 1
+  fi
+}
+
+cask_apps() {
+  brew info --cask --json=v2 "$1" | /usr/bin/python3 -I -c '
+import json, sys
+for cask in json.load(sys.stdin)["casks"]:
+    for artifact in cask.get("artifacts", []):
+        for item in artifact.get("app", []):
+            if isinstance(item, str):
+                print(item)
+'
+}
+
+# A pkg installer asks for an admin password, and this job has no terminal to ask in.
+cask_needs_root() {
+  brew info --cask --json=v2 "$1" | /usr/bin/python3 -I -c '
+import json, sys
+casks = json.load(sys.stdin)["casks"]
+sys.exit(0 if any("pkg" in artifact for cask in casks for artifact in cask.get("artifacts", [])) else 1)
+'
+}
+
+# Installs or upgrades one cask, then restarts its app if the swap closed it.
+swap_cask() {
+  local verb=$1 token=$2 running="" app rc apps pids
+  apps=$(cask_apps "$token")
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    if [ -n "$(ms_app_pids "$app" MacOS/)" ]; then
+      running="$running$app
+"
+      # Brew quits a running app with AppleScript, which raises a permission prompt under launchd.
+      pids=$(ms_app_pids "$app")
+      # shellcheck disable=SC2086
+      kill -TERM $pids 2>/dev/null
+      sleep 3
+    fi
+  done <<EOF
+$apps
+EOF
+  if [ "$verb" = install ]; then
+    brew install --cask --force "$token"
+  else
+    brew upgrade --cask --greedy-auto-updates "$token"
+  fi
+  rc=$?
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    clear_quarantine_if_trusted "/Applications/$app"
+  done <<EOF
+$apps
+EOF
+  while IFS= read -r app; do
+    [ -n "$app" ] || continue
+    [ -n "$(ms_app_pids "$app" MacOS/)" ] || open -a "/Applications/$app"
+  done <<EOF
+$running
+EOF
+  return $rc
+}
+
+# Self-updaters only run while their app runs, so apps that stay closed fall years behind.
+# The bundle must still exist, so an app you deleted is not reinstalled.
+ch_adopt_apps() {
+  local token app failed="" adopted=0 managed list="$MS_CONFIG_DIR/adopt-apps.txt"
+  [ -f "$list" ] || { detail "no adopt-apps.txt"; return 0; }
+  managed=$(brew list --cask)
+  while IFS='|' read -r token app; do
+    case "$token" in ''|\#*) continue ;; esac
+    echo "$managed" | grep -qxF "$token" && continue
+    [ -d "/Applications/$app" ] || continue
+    ensure_space || { detail "low disk: $(ms_free_gib) GiB, adopted $adopted"; return 75; }
+    log "adopting $token"
+    if swap_cask install "$token"; then
+      adopted=$((adopted + 1))
+      brew cleanup -s "$token" >/dev/null 2>&1
+    else
+      failed="$failed $token"
+    fi
+  done <"$list"
+  detail "adopted $adopted; failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
+ch_brew_casks() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  local token failed="" upgraded=0 outdated needs_root=""
+  outdated=$(brew outdated --cask --greedy-auto-updates --quiet)
+  for token in $outdated; do
+    if cask_needs_root "$token"; then
+      needs_root="$needs_root $token"
+      continue
+    fi
+    ensure_space || { detail "low disk: $(ms_free_gib) GiB, upgraded $upgraded"; return 75; }
+    if swap_cask upgrade "$token"; then
+      upgraded=$((upgraded + 1))
+      brew cleanup -s "$token" >/dev/null 2>&1
+    else
+      failed="$failed $token"
+    fi
+  done
+  detail "upgraded $upgraded; needs vendor-installers:${needs_root:- none}; failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
+ch_npm() {
+  local pkg failed="" count=0 pkgs listing rc
+  # Exit 1 means packages are outdated, and also that the check failed. Only the former lists any.
+  listing=$(npm outdated -g --parseable 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ -z "$listing" ]; then
+    detail "could not check for updates"
+    return 75
+  fi
+  # --parseable fields: path:wanted:current:latest:location, each package written as name@version.
+  pkgs=$(printf '%s\n' "$listing" | cut -d: -f4 | sed 's/@[^@]*$//')
+  for pkg in $pkgs; do
+    if npm install -g "$pkg@latest"; then count=$((count + 1)); else failed="$failed $pkg"; fi
+  done
+  detail "updated $count; failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
+ch_rust() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  rustup update --no-self-update
+  local rc=$?
+  # A self-update can fail on its own temp file and pass on the next attempt.
+  rustup self update || { sleep "${MS_RETRY_SECONDS:-30}"; rustup self update; } || rc=1
+  detail "$(rustc --version); $(rustup --version 2>/dev/null | head -1)"
+  [ $rc -eq 0 ]
+}
+
+ch_cargo() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  local crate failed="" count=0 crates
+  crates=$(cargo install --list | sed -nE 's/^([A-Za-z0-9_-]+) v[^ ]+:$/\1/p')
+  for crate in $crates; do
+    count=$((count + 1))
+    cargo install --locked "$crate" || cargo install "$crate" || failed="$failed $crate"
+  done
+  detail "checked $count registry crates; failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
+repo_lock() {
+  local dir=$1
+  while [ "$dir" != / ]; do
+    [ -f "$dir/Cargo.lock" ] && { echo "$dir/Cargo.lock"; return 0; }
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
+
+# Builds from the committed default branch, so uncommitted work or a feature branch in the
+# checkout neither blocks a security rebuild nor ends up in the binary.
+export_default_branch() {
+  local path=$1 dest=$2 top prefix ref
+  top=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null) || return 1
+  prefix=$(git -C "$path" rev-parse --show-prefix)
+  GIT_SSH_COMMAND='ssh -o BatchMode=yes' git -C "$top" fetch --quiet origin 2>/dev/null
+  ref=$(git -C "$top" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null) || ref=main
+  mkdir -p "$dest"
+  git -C "$top" archive "$ref" | tar -x -C "$dest"
+  [ -f "$dest/$prefix/Cargo.toml" ] || return 1
+  echo "$dest/$prefix"
+}
+
+ch_cargo_local() {
+  local path lock ids state rebuilt="" failed="" unaudited="" known=0 bin bins work crate installed sign mapping paths
+  sign=$(ms_config_get CARGO_LOCAL_SIGN_COMMAND)
+  mkdir -p "$MS_STATE_DIR/cargo-local"
+  mapping=$(cargo install --list | awk '/^[^ ]/{p=""; if (match($0,/\(\/.*\):$/)) p=substr($0,RSTART+1,RLENGTH-3)} /^ /{if(p!="") print p"|"$1}')
+  paths=$(printf '%s\n' "$mapping" | cut -d'|' -f1 | sort -u)
+  while IFS= read -r path; do
+    [ -d "$path" ] || continue
+    lock=$(repo_lock "$path") || continue
+    ids=$(cargo audit --json --file "$lock" 2>/dev/null | /usr/bin/python3 -I -c '
+import json, sys
+try:
+    found = json.load(sys.stdin)["vulnerabilities"]["list"]
+except (ValueError, KeyError):
+    sys.exit(3)
+print(" ".join(sorted({v["advisory"]["id"] for v in found})))
+') || { unaudited="$unaudited $(basename "$path")"; continue; }
+    [ -n "$ids" ] || continue
+    state="$MS_STATE_DIR/cargo-local/$(echo "$path" | tr '/ ' '__')"
+    if [ "$(cat "$state" 2>/dev/null)" = "$ids" ]; then
+      known=$((known + 1))
+      continue
+    fi
+    ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+    work=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-build.XXXXXX")
+    # --root keeps the temporary source path out of cargo's install records, which this reads.
+    if crate=$(export_default_branch "$path" "$work/src") &&
+      CARGO_TARGET_DIR="$work/target" cargo install --path "$crate" --root "$work/root"; then
+      bins=$(printf '%s\n' "$mapping" | grep -F "$path|" | cut -d'|' -f2)
+      installed=1
+      for bin in $bins; do
+        [ -z "$sign" ] || "$sign" "$work/root/bin/$bin"
+        mv -f "$work/root/bin/$bin" "$HOME/.cargo/bin/$bin" || installed=0
+      done
+      if [ "$installed" -eq 1 ]; then
+        echo "$ids" >"$state"
+        rebuilt="$rebuilt $(basename "$path")"
+      else
+        failed="$failed $(basename "$path")"
+      fi
+    else
+      failed="$failed $(basename "$path")"
+    fi
+    rm -rf "$work"
+  done <<EOF
+$paths
+EOF
+  detail "rebuilt:${rebuilt:- none}; already handled: $known; audit unavailable:${unaudited:- none}; failed:${failed:- none}"
+  [ -n "$failed" ] && return 1
+  [ -n "$unaudited" ] && return 75
+  return 0
+}
+
+ch_gcloud() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  gcloud components update --quiet
+  local rc=$?
+  detail "$(gcloud version 2>/dev/null | head -1)"
+  [ $rc -eq 0 ]
+}
+
+ch_bun() {
+  bun upgrade
+  local rc=$?
+  detail "bun $(bun --version)"
+  [ $rc -eq 0 ]
+}
+
+ch_uv() {
+  uv python upgrade
+  local rc=$?
+  detail "$(uv python list --only-installed --managed-python 2>/dev/null | awk '{print $1}' | sed -E 's/-macos.*//' | tr '\n' ' ')"
+  [ $rc -eq 0 ]
+}
+
+# npx keeps a fetched package forever, so `npx playwright` stays on its first version until the
+# cached copy goes. Copies a running process has loaded stay until that process ends.
+# Nothing is installed for someone who does not already use Playwright.
+ch_playwright() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  local dir rc=0 latest node_version="" python_version="" python browsers used_npx=0
+  python=$(ms_config_get PLAYWRIGHT_PYTHON python3)
+  browsers=$(ms_config_get PLAYWRIGHT_BROWSERS chromium)
+  for dir in "$HOME"/.npm/_npx/*; do
+    [ -d "$dir/node_modules/playwright" ] || continue
+    used_npx=1
+    ps -axww -o command= | grep -qF "$dir" && continue
+    rm -rf "$dir"
+  done
+  if [ "$used_npx" -eq 1 ] && command -v npx >/dev/null 2>&1; then
+    # shellcheck disable=SC2086
+    npx --yes playwright install $browsers || rc=1
+    node_version=$(npx --yes playwright --version 2>/dev/null | awk '{print $2}')
+  fi
+  if command -v "$python" >/dev/null 2>&1 && "$python" -c 'import playwright' 2>/dev/null; then
+    "$python" -m pip install --quiet --upgrade --user --only-binary :all: pip playwright || rc=1
+    # shellcheck disable=SC2086
+    "$python" -m playwright install $browsers || rc=1
+    python_version=$("$python" -m playwright --version 2>/dev/null | awk '{print $2}')
+  fi
+  if [ -z "$node_version$python_version" ]; then
+    detail "not in use"
+    return $rc
+  fi
+  latest=$(npm view playwright version 2>/dev/null)
+  detail "npx ${node_version:-unused}, python ${python_version:-unused}, npm latest ${latest:-unknown}"
+  [ $rc -eq 0 ] && { [ -z "$node_version" ] || [ "$node_version" = "$latest" ]; }
+}
+
+ch_claude_code() {
+  claude update
+  local rc=$?
+  detail "$(claude --version 2>/dev/null)"
+  [ $rc -eq 0 ]
+}
+
+vm_runner_busy() {
+  colima ssh --profile "$1" -- sh -c 'docker ps -q | xargs -r -n1 docker top 2>/dev/null | grep -q Runner.Worker'
+}
+
+# Homebrew replacing Lima leaves its host-side processes on the old binary until they restart.
+lima_host_stale() {
+  local linked pid started limactl_path
+  limactl_path=$(command -v limactl) || return 1
+  linked=$(stat -f %m "$limactl_path") || return 1
+  for pid in $(pgrep -f '/limactl (hostagent|usernet)'); do
+    started=$(date -j -f '%a %b %e %T %Y' "$(LC_ALL=C ps -o lstart= -p "$pid" | xargs)" +%s 2>/dev/null) || continue
+    [ "$started" -ge "$linked" ] || return 0
+  done
+  return 1
+}
+
+# Every VM shares one usernet process, so it can only be replaced with all of them stopped.
+restart_lima_host() {
+  local profile rc=0
+  for profile in "$@"; do
+    colima stop --profile "$profile" || rc=1
+  done
+  pkill -f '/limactl usernet'
+  for profile in "$@"; do
+    colima start --profile "$profile" || rc=1
+  done
+  return $rc
+}
+
+ch_colima() {
+  local profile profiles out deferred="" done_list="" failed="" restarts="" versions="" any_busy=0
+  local script='export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq || exit 1
+dpkg -s unattended-upgrades >/dev/null 2>&1 || apt-get install -y -qq unattended-upgrades || exit 1
+apt-get -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade || exit 1
+apt-get -y -qq autoremove
+test -f /var/run/reboot-required && echo REBOOT_REQUIRED
+exit 0'
+  profiles=$(colima list --json 2>/dev/null | /usr/bin/python3 -I -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if line and json.loads(line).get("status") == "Running":
+        print(json.loads(line)["name"])
+')
+  for profile in $profiles; do
+    if vm_runner_busy "$profile"; then
+      deferred="$deferred $profile"
+      continue
+    fi
+    if ! out=$(colima ssh --profile "$profile" -- sudo sh -c "$script" 2>&1); then
+      echo "$out"
+      failed="$failed $profile"
+      continue
+    fi
+    echo "$out"
+    # Colima holds docker-ce and containerd.io in apt, so dist-upgrade skips them.
+    colima update --profile "$profile" || failed="$failed $profile(runtime)"
+    if echo "$out" | grep -q REBOOT_REQUIRED; then
+      restarts="$restarts $profile"
+    fi
+    done_list="$done_list $profile"
+  done
+  if lima_host_stale; then
+    for profile in $profiles; do
+      vm_runner_busy "$profile" && any_busy=1
+    done
+    if [ "$any_busy" -eq 1 ]; then
+      deferred="$deferred lima-host"
+    else
+      # shellcheck disable=SC2086
+      restart_lima_host $profiles || failed="$failed lima-host"
+      restarts=""
+    fi
+  fi
+  for profile in $restarts; do
+    if vm_runner_busy "$profile"; then
+      deferred="$deferred $profile(restart)"
+    else
+      colima restart --profile "$profile" || failed="$failed $profile(restart)"
+    fi
+  done
+  for profile in $profiles; do
+    versions="$versions $profile=$(colima ssh --profile "$profile" -- docker version --format '{{.Server.Version}}' 2>/dev/null)"
+  done
+  detail "patched:${done_list:- none}; docker:${versions:- none}; deferred:${deferred:- none}; failed:${failed:- none}"
+  [ -n "$failed" ] && return 1
+  [ -n "$deferred" ] && return 75
+  return 0
+}
+
+module_limit_seconds() {
+  [ -z "${MS_MODULE_LIMIT:-}" ] || { echo "$MS_MODULE_LIMIT"; return; }
+  case $1 in
+    adopt-apps|brew-casks) echo 10800 ;;
+    brew-formulae|cargo) echo 7200 ;;
+    *) echo 3600 ;;
+  esac
+}
+
+# Job control gives each module its own process group, so the timeout reaches its children and a
+# hung tool cannot hold the lock and silently stop every later run.
+run_module() {
+  local name=$1 fn started rc result elapsed limit pid watchdog tool
+  fn="ch_$(echo "$name" | tr '-' '_')"
+  if [ "$name" != disk ] && ! ms_module_available "$name"; then
+    tool=$(ms_module_field "$name" 3)
+    printf '%s\t%s\tskipped\t0\t%s not installed\n' "$(date '+%Y-%m-%d %H:%M')" "$name" "$tool" >>"$RUN_TSV"
+    return 0
+  fi
+  started=$(date +%s)
+  limit=$(module_limit_seconds "$name")
+  : >"$DETAIL_FILE"
+  log "=== $name"
+  set -m
+  ( "$fn" ) >>"$RUN_LOG" 2>&1 </dev/null &
+  pid=$!
+  ( sleep "$limit"; kill -TERM -- "-$pid" ) >/dev/null 2>&1 &
+  watchdog=$!
+  set +m
+  wait "$pid" 2>/dev/null
+  rc=$?
+  kill -- "-$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  elapsed=$(($(date +%s) - started))
+  [ "$elapsed" -lt "$limit" ] || printf 'timed out after %ss' "$limit" >"$DETAIL_FILE"
+  case $rc in
+    0) result=ok ;;
+    75) result=deferred ;;
+    *) result=failed ;;
+  esac
+  log "=== $name: $result (exit $rc, ${elapsed}s) $(cat "$DETAIL_FILE")"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$name" "$result" "$elapsed" "$(tr '\n\t' '  ' <"$DETAIL_FILE")" >>"$RUN_TSV"
+}
+
+: >"$RUN_TSV"
+modules=$*
+if [ -z "$modules" ]; then
+  for id in $(ms_module_ids); do
+    case "$id" in browsers) continue ;; esac
+    [ "$(ms_module_field "$id" 2)" = user ] && ms_user_enabled "$id" && modules="$modules $id"
+  done
+fi
+
+run_module disk
+for module in $modules; do
+  run_module "$module"
+done
+
+cp "$RUN_TSV" "$MS_STATE_DIR/last-run.tsv"
+find "$MS_LOG_DIR" -name '*.log' -mtime +30 -delete 2>/dev/null
+find "$MS_STATE_DIR/runs" -name '*.tsv' -mtime +30 -delete 2>/dev/null
+
+problems=$(awk -F'\t' '$3=="failed"{printf "%s ",$2}' "$RUN_TSV")
+[ -z "$problems" ] || ms_notify "mac-secure: updates failed" "Failed: $problems. Run: mac-secure logs"
+[ "$(ms_free_gib)" -ge "$HARD_MIN_FREE_GIB" ] || ms_notify "mac-secure: disk nearly full" "$(ms_free_gib) GiB free. Updates are deferred until space is freed."
+exit 0

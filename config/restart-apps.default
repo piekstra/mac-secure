@@ -1,0 +1,7 @@
+# Apps the enforcer restarts when they still run old code. Copy to
+# ~/.config/mac-secure/restart-apps.txt to change the list.
+# Format: name|app path|executable in Contents/MacOS|arguments for the restart
+Google Chrome|/Applications/Google Chrome.app|Google Chrome|--restore-last-session
+Microsoft Edge|/Applications/Microsoft Edge.app|Microsoft Edge|--restore-last-session
+Brave Browser|/Applications/Brave Browser.app|Brave Browser|--restore-last-session
+Firefox|/Applications/Firefox.app|firefox|

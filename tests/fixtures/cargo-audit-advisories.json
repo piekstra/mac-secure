@@ -1,0 +1,1 @@
+{"database":{},"lockfile":{},"vulnerabilities":{"found":true,"count":2,"list":[{"advisory":{"id":"RUSTSEC-2026-0002"}},{"advisory":{"id":"RUSTSEC-2026-0001"}}]},"warnings":{}}

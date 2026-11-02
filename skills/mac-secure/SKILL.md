@@ -1,0 +1,72 @@
+---
+name: mac-secure
+description: Inspect and manage a Mac's security settings and automatic updates with the mac-secure CLI. Use when the user asks whether their Mac is secure or up to date, wants apps, Homebrew, browsers, macOS or developer tools to update automatically, asks what software or leftovers to remove from a Mac, wants a second-hand Mac checked, or when a mac-secure job failed or a notification from it needs explaining.
+---
+
+# mac-secure
+
+`mac-secure` reports a Mac's security state and installs jobs that keep it updated. If the command is missing, the repository is https://github.com/piekstra/mac-secure; ask before cloning and installing it.
+
+## Start read-only
+
+These never write, prompt, or raise a dialog. Call them freely, and prefer them to hand-written checks:
+
+```sh
+mac-secure status --json    # settings, jobs, each module's last result
+mac-secure audit --json     # findings, most severe first: severity, id, finding, action
+mac-secure modules --json   # every module: scope, recommended, enabled, available, summary, disruption
+mac-secure logs daily -n 100   # also: enforcer, root
+```
+
+Report findings with their `action`. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
+
+## Changing the Mac
+
+Enabling a module changes what happens to this Mac every night, so the user decides. Before running `enable`:
+
+1. Show the `summary` and `disruption` of each module you propose.
+2. Get the user's approval for those modules.
+3. Run `mac-secure enable <modules> --yes`. `--yes` records an approval you already have; never use it to skip asking.
+
+Treat these as separate decisions, each stated plainly, and never bundle them into a general yes:
+
+| Module | The decision |
+| --- | --- |
+| `macos-unattended` | A hidden admin account, and the Mac restarting by itself at night |
+| `macos-major` | Taking new major macOS versions as they ship |
+| `adopt-apps` | Replacing installed apps with Homebrew's copies |
+| `colima` | Restarting Docker and VMs |
+
+## Root steps belong to the person
+
+A root module exits 3 without a terminal and prints the exact `sudo` command. Give the user that command and stop that step. A helper file they can double-click is fine if they ask for one.
+
+- Never ask for, read, type, or store a password.
+- Do not add a `sudoers` rule or otherwise remove the password prompt.
+- Do not run `brew` or `npm` as root.
+- After the user says they ran it, check once with `mac-secure status --json` and `mac-secure logs root`.
+
+## Rules that prevent damage
+
+- **Never poll anything that can raise a dialog.** That includes `sudo`, keychain reads, `osascript`, and anything asking for permission. Each poll raises its own prompt. Probe once and wait to be told. To watch for progress, read a file or a log.
+- **Look before deleting.** `audit` names things to review; it does not authorize removal. List what is inside a target and get an OK per item. An account's files, Trash, and old user folders can hold the only copy of someone's photos, messages, or keychain.
+- **Check for a wallet before removing crypto apps.** Ask the user to confirm funds and seed phrases first.
+- **`GRACE_SECONDS=0` applies to every listed app.** `GRACE_SECONDS=0 mac-secure run browsers` restarts every stale app without warning. To test one app, name it to the job: `GRACE_SECONDS=0 jobs/enforcer Firefox`.
+- **Do not test a restart.** `macos-update` without `--no-restart` can restart the Mac. `mac-secure run` always passes `--no-restart`.
+
+## Reading results
+
+| In `status --json` | Meaning | What to do |
+| --- | --- | --- |
+| `last_result: failed` | The module's tool failed | Read `mac-secure logs daily`, or `logs root` for a root module, then fix the cause |
+| `last_result: deferred` | Retried next run: low disk, a busy CI runner, or an audit that could not run | Read `last_detail`; act only if it repeats |
+| `last_result: skipped` | The tool is not installed | Nothing |
+| `root_job: outdated` | The installed root job differs from this checkout or settings | Ask the user to run `mac-secure refresh` at a terminal and read the changes it shows before approving. A process running as the user can edit the checkout, so do not approve them on the user's behalf |
+| `security.* : unknown` | The check could not run | Say so; never report it as on |
+| `security.* : unset` | The Mac uses Apple's default for that key | `mac-secure enable` sets it |
+
+A run that passed once proves little about tomorrow. To check a job in its real environment, use `launchctl kickstart gui/$(id -u)/io.github.piekstra.mac-secure.daily` and read the log. A calendar job does not fire while the job is still running.
+
+## Taking a new version
+
+mac-secure does not update itself. Review the change, `git pull` in the checkout, then have the user run `mac-secure refresh`.

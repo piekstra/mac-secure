@@ -1,0 +1,4 @@
+COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+exampled  101 user    4u  IPv4 0x1          0t0  TCP *:5000 (LISTEN)
+localhost 102 user    4u  IPv4 0x2          0t0  TCP 127.0.0.1:8080 (LISTEN)
+localsix  103 user    4u  IPv6 0x3          0t0  TCP [::1]:8081 (LISTEN)

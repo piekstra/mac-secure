@@ -1,0 +1,1 @@
+error: failed to fetch the advisory database

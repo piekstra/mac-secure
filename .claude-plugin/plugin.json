@@ -1,0 +1,8 @@
+{
+  "name": "mac-secure",
+  "version": "0.1.0",
+  "description": "Inspect and manage a Mac's security settings and automatic updates with the mac-secure CLI.",
+  "author": {
+    "name": "Caleb Piekstra"
+  }
+}

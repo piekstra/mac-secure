@@ -1,0 +1,14 @@
+{
+  "name": "mac-secure",
+  "owner": {
+    "name": "Caleb Piekstra"
+  },
+  "description": "Skill for the mac-secure CLI.",
+  "plugins": [
+    {
+      "name": "mac-secure",
+      "source": "./",
+      "description": "Inspect and manage a Mac's security settings and automatic updates with the mac-secure CLI."
+    }
+  ]
+}

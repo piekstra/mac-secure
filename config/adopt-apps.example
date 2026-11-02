@@ -1,0 +1,9 @@
+# Copy to ~/.config/mac-secure/adopt-apps.txt, then run: mac-secure enable adopt-apps
+#
+# Format: Homebrew cask token|app bundle name in /Applications
+#
+# An app that updates itself only does so while it runs, so one left closed falls behind. A listed
+# app is reinstalled under Homebrew once, which then updates it while closed. An app you have deleted
+# is not reinstalled. A cask whose installer is a pkg needs vendor-installers instead.
+firefox|Firefox.app
+slack|Slack.app

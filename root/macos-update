@@ -1,0 +1,403 @@
+#!/bin/bash
+# Root job: macOS and Safari updates, App Store and firewall settings, vendor pkg installers.
+# Usage: macos-update [--no-restart]
+#
+# Installed root-owned because it runs as root. It must call system binaries only: anything under
+# /opt/homebrew or a home directory is user-writable and would hand root to any process running as
+# the user. It reads settings from root-owned files only, and never sources them.
+#
+# sudo keeps the calling user's HOME, and tools act on what they find there: curl reads ~/.curlrc,
+# which can name any file to write. So the job re-executes with an empty environment, and curl also
+# gets -q, which ignores .curlrc.
+
+set -u
+umask 077
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C
+
+LIBEXEC=/usr/local/libexec/mac-secure
+STATE=/var/db/mac-secure
+LOG_DIR=/var/log/mac-secure
+LOG=$LOG_DIR/macos.log
+RESULTS=$LOG_DIR/last-run.tsv
+CONF=$LIBEXEC/root.conf
+VENDOR_LIST=$LIBEXEC/vendor-installers.txt
+SERVICE_USER=secupdate
+SERVICE_PASSWORD_FILE=$STATE/service-password
+FIREWALL=/usr/libexec/ApplicationFirewall/socketfilterfw
+WARNING_SECONDS=300
+NETWORK_ATTEMPTS=30
+NETWORK_RETRY_SECONDS=10
+ALLOW_RESTART=1
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# Same format as the daily job's results, read by `mac-secure status`.
+record_result() {
+  printf '%s\t%s\t%s\t0\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$1" "$2" "$3" >>"$RESULTS.new"
+}
+
+publish_results() {
+  [ -f "$RESULTS.new" ] || return 0
+  chmod 644 "$RESULTS.new"
+  cp -f "$RESULTS.new" "$RESULTS"
+}
+
+module_on() { grep -qxF "$1" "$CONF" 2>/dev/null; }
+
+console_uid() { stat -f %u /dev/console; }
+
+# asuser changes the session, not the uid, so sudo is what makes this run as the user.
+# At the login window the console belongs to root and there is nobody to show anything to.
+as_console_user() {
+  local uid
+  uid=$(console_uid)
+  [ "$uid" != 0 ] || return 0
+  launchctl asuser "$uid" /usr/bin/sudo -u "#$uid" "$@"
+}
+
+notify() {
+  as_console_user /usr/bin/osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' "$1" "$2" &
+}
+
+apply_settings() {
+  local su=/Library/Preferences/com.apple.SoftwareUpdate
+  if module_on macos; then
+    defaults write "$su" AutomaticCheckEnabled -bool true
+    defaults write "$su" AutomaticDownload -bool true
+    defaults write "$su" AutomaticallyInstallMacOSUpdates -bool true
+    defaults write "$su" ConfigDataInstall -bool true
+    defaults write "$su" CriticalUpdateInstall -bool true
+  fi
+  if module_on app-store; then
+    defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool true
+  fi
+  # Sending "on" reloads the network filter and drops DNS for a moment, so only send it when off.
+  if module_on firewall && ! "$FIREWALL" --getglobalstate | grep -q enabled; then
+    "$FIREWALL" --setglobalstate on
+    "$FIREWALL" --setallowsigned on
+    "$FIREWALL" --setallowsignedapp on
+  fi
+}
+
+# Waking from sleep and firewall changes leave the network down briefly, and softwareupdate then
+# reports nothing to install rather than an error.
+wait_for_network() {
+  local tries=0
+  until curl -q --silent --head --max-time 10 -o /dev/null https://www.apple.com/; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge "$NETWORK_ATTEMPTS" ]; then
+      log "no network after $tries attempts; skipping this run"
+      notify "macOS update skipped" "No network at the scheduled time. See $LOG."
+      return 1
+    fi
+    sleep "$NETWORK_RETRY_SECONDS"
+  done
+}
+
+# softwareupdate has printed "Not enough free disk space" and carried on, so the output is checked too.
+softwareupdate_checked() {
+  local out rc
+  out=$(softwareupdate "$@" 2>&1)
+  rc=$?
+  printf '%s\n' "$out"
+  log "softwareupdate $1 $2 exited $rc"
+  case "$out" in *"Not enough free disk space"*) rc=1 ;; esac
+  [ "$rc" -eq 0 ] || notify "macOS update failed" "$2 did not finish. See $LOG."
+  return "$rc"
+}
+
+# Prints one "action|version|label" line per update; action is install, restart or skip.
+# Usage: plan_apple_updates <softwareupdate --list output> <current major> <1 if majors allowed>
+plan_apple_updates() {
+  local listing=$1 current=$2 allow_major=$3 label="" line version action
+  while IFS= read -r line; do
+    case "$line" in
+      "* Label: "*)
+        label=${line#\* Label: }
+        ;;
+      *"Title: "*)
+        [ -n "$label" ] || continue
+        version=$(printf '%s' "$line" | sed -nE 's/.*Version: ([^,]+),.*/\1/p')
+        case "$line" in *"Action: restart"*) action=restart ;; *) action=install ;; esac
+        case "$label" in
+          macOS*)
+            if [ "$allow_major" != 1 ] && [ "${version%%.*}" != "$current" ]; then
+              action=skip
+            fi
+            ;;
+        esac
+        printf '%s|%s|%s\n' "$action" "$version" "$label"
+        label=""
+        ;;
+    esac
+  done <<EOF
+$listing
+EOF
+}
+
+# Lowest version first: each install restarts the Mac, and the next run picks up what remains.
+# Sorted on the version, because labels do not sort: "macOS 27.2" comes before "macOS Tahoe 26.7.2".
+next_restart_label() {
+  grep '^restart|' | cut -d'|' -f2- | sort -V | head -1 | cut -d'|' -f2-
+}
+
+install_restart_update() {
+  local label=$1
+  if ! module_on macos-unattended || [ ! -s "$SERVICE_PASSWORD_FILE" ]; then
+    log "downloading $label; installing it needs your password"
+    softwareupdate_checked --download "$label" || return 1
+    notify "macOS update ready" "$label is downloaded. Install it in System Settings, Software Update."
+    as_console_user /usr/bin/open "x-apple.systempreferences:com.apple.Software-Update-Settings.extension" || true
+    return
+  fi
+  if [ "$ALLOW_RESTART" -eq 0 ]; then
+    log "downloading $label; it installs on the next scheduled run"
+    softwareupdate_checked --download "$label"
+    return
+  fi
+  notify "Mac restarting soon" "$label installs and the Mac restarts in $((WARNING_SECONDS / 60)) minutes."
+  log "waiting ${WARNING_SECONDS}s, then installing $label with a restart"
+  sleep "$WARNING_SECONDS"
+  # A successful install restarts the Mac before this job can finish.
+  record_result macos ok "installing $label with a restart"
+  publish_results
+  softwareupdate_checked --install "$label" --restart --user "$SERVICE_USER" --stdinpass <"$SERVICE_PASSWORD_FILE"
+}
+
+run_apple_updates() {
+  local listing plan allow_major=0 action version label rc=0
+  listing=$(softwareupdate --list 2>&1)
+  case "$listing" in
+    *"* Label: "*|*"No new software available"*) ;;
+    *)
+      printf '%s\n' "$listing"
+      log "softwareupdate could not check for updates"
+      notify "macOS update check failed" "See $LOG."
+      return 1
+      ;;
+  esac
+  module_on macos-major && allow_major=1
+  plan=$(plan_apple_updates "$listing" "$(sw_vers -productVersion | cut -d. -f1)" "$allow_major")
+  while IFS='|' read -r action version label; do
+    case "$action" in
+      install)
+        log "installing $label"
+        softwareupdate_checked --install "$label" || rc=1
+        ;;
+      skip)
+        log "skipping major upgrade $label ($version); macos-major is off"
+        ;;
+    esac
+  done <<EOF
+$plan
+EOF
+  label=$(printf '%s\n' "$plan" | next_restart_label)
+  if [ -n "$label" ]; then
+    install_restart_update "$label" || rc=1
+  fi
+  return "$rc"
+}
+
+valid_vendor_line() {
+  printf '%s\n' "$1" | grep -qE '^[a-z0-9][a-z0-9@.+-]*\|[A-Z0-9]{10}$'
+}
+
+# Homebrew's top-level fields describe the arm64 build. Intel builds that differ are under
+# variations.<macOS codename>, and a cask with one installer for both has no such entry.
+# Usage: cask_field <json file> <field>
+cask_field() {
+  local json=$1 field=$2 codename
+  if [ "$(uname -m)" != arm64 ]; then
+    case "$(sw_vers -productVersion | cut -d. -f1)" in
+      26) codename=tahoe ;;
+      15) codename=sequoia ;;
+      14) codename=sonoma ;;
+      13) codename=ventura ;;
+      *) codename=monterey ;;
+    esac
+    plutil -extract "variations.$codename.$field" raw -o - "$json" 2>/dev/null && return 0
+  fi
+  plutil -extract "$field" raw -o - "$json"
+}
+
+https_get() {
+  curl -q --proto '=https' --proto-redir '=https' --fail --silent --show-error --location "$@"
+}
+
+# Prints the team on the leaf certificate, if Apple issued the chain. A self-signed certificate can
+# name any team, and pkgutil then exits non-zero while still printing that name.
+pkg_signing_team() {
+  local out
+  out=$(pkgutil --check-signature "$1") || return 1
+  case "$out" in
+    *"Status: signed by a developer certificate issued by Apple"*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$out" | sed -nE 's/^ +1\. Developer ID Installer: .* \(([A-Z0-9]{10})\)$/\1/p'
+}
+
+gatekeeper_on() {
+  spctl --status 2>/dev/null | grep -q 'assessments enabled'
+}
+
+version_is_older() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+}
+
+vendor_refuse() {
+  log "$1: $2"
+  notify "Vendor installer not installed" "$1: $2. See $LOG."
+  return 1
+}
+
+# Homebrew's API names the version, download and sha256, so a compromised API can offer any package
+# the pinned team signed. The team, Apple's chain, Gatekeeper and the version check are what limit it.
+#
+# The state file holds the installed version; latest:<sha256> for a cask with no version, which can
+# only be compared by downloading it; or unsupported:<version> when the download was not a pkg, so
+# that it is not fetched and reported again until the version changes.
+vendor_install_in() {
+  local token=$1 team=$2 work=$3 state="$STATE/vendor/$1" json="$3/cask.json" pkg="$3/installer.pkg"
+  local installed version url sha actual
+  installed=$(cat "$state" 2>/dev/null)
+  if ! https_get --max-time 60 -o "$json" "https://formulae.brew.sh/api/cask/$token.json"; then
+    log "$token: could not read version metadata"
+    return 1
+  fi
+  version=$(cask_field "$json" version)
+  url=$(cask_field "$json" url)
+  sha=$(cask_field "$json" sha256)
+  if [ -z "$version" ] || [ -z "$url" ] || [ -z "$sha" ]; then
+    vendor_refuse "$token" "Homebrew's metadata is incomplete"
+    return
+  fi
+  if [ "$version" != latest ]; then
+    [ "$installed" != "$version" ] || return 0
+    [ "$installed" != "unsupported:$version" ] || return 0
+    case "$installed" in
+      ''|*:*) ;;
+      *)
+        if version_is_older "$version" "$installed"; then
+          vendor_refuse "$token" "Homebrew offers $version, older than the installed $installed"
+          return
+        fi
+        ;;
+    esac
+  fi
+  case "$url" in
+    https://*) ;;
+    *)
+      vendor_refuse "$token" "refusing a download that is not https"
+      return
+      ;;
+  esac
+  if ! https_get --max-time 1800 -o "$pkg" "$url"; then
+    log "$token: download failed"
+    return 1
+  fi
+  if [ "$(head -c 4 "$pkg")" != 'xar!' ]; then
+    echo "unsupported:$version" >"$state"
+    vendor_refuse "$token" "the download is not a pkg, which vendor-installers cannot install"
+    return
+  fi
+  actual=$(shasum -a 256 "$pkg" | awk '{print $1}')
+  [ "$version" != latest ] || [ "$installed" != "latest:$actual" ] || return 0
+  if [ "$sha" != no_check ] && [ "$actual" != "$sha" ]; then
+    vendor_refuse "$token" "sha256 mismatch, expected $sha, got $actual"
+    return
+  fi
+  # With Gatekeeper off, an assessment accepts anything.
+  if ! gatekeeper_on; then
+    vendor_refuse "$token" "Gatekeeper is off, so the installer cannot be assessed"
+    return
+  fi
+  if [ "$(pkg_signing_team "$pkg")" != "$team" ]; then
+    vendor_refuse "$token" "not signed by the pinned team $team"
+    return
+  fi
+  if ! spctl --assess --type install "$pkg"; then
+    vendor_refuse "$token" "rejected by Gatekeeper"
+    return
+  fi
+  log "$token: installing $version"
+  if ! installer -pkg "$pkg" -target /; then
+    vendor_refuse "$token" "the installer failed"
+    return
+  fi
+  if [ "$version" = latest ]; then
+    echo "latest:$actual" >"$state"
+  else
+    echo "$version" >"$state"
+  fi
+  log "$token: installed $version"
+}
+
+update_vendor_pkg() {
+  local work rc
+  work=$(mktemp -d /var/tmp/mac-secure.XXXXXX) || return 1
+  vendor_install_in "$1" "$2" "$work"
+  rc=$?
+  rm -rf "$work"
+  return "$rc"
+}
+
+run_vendor_installers() {
+  local line failed=""
+  [ -f "$VENDOR_LIST" ] || { record_result vendor-installers ok "no list"; return 0; }
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    if ! valid_vendor_line "$line"; then
+      log "ignoring invalid vendor line: $line"
+      continue
+    fi
+    update_vendor_pkg "${line%%|*}" "${line##*|}" || failed="$failed ${line%%|*}"
+  done <"$VENDOR_LIST"
+  if [ -n "$failed" ]; then
+    record_result vendor-installers failed "failed:$failed"
+    return 1
+  fi
+  record_result vendor-installers ok "current"
+}
+
+main() {
+  [ "${1:-}" = "--no-restart" ] && ALLOW_RESTART=0
+  mkdir -p "$STATE/vendor" "$LOG_DIR"
+  chmod 755 "$LOG_DIR"
+  [ ! -f "$LOG" ] || [ "$(stat -f %z "$LOG")" -lt 5242880 ] || mv -f "$LOG" "$LOG.old"
+  exec >>"$LOG" 2>&1
+  chmod 644 "$LOG"
+
+  log "started (restart allowed: $ALLOW_RESTART)"
+  rm -f "$RESULTS.new"
+  apply_settings
+  if module_on firewall; then
+    if "$FIREWALL" --getglobalstate | grep -q enabled; then
+      record_result firewall ok "on"
+    else
+      record_result firewall failed "could not turn it on"
+    fi
+  fi
+  ! module_on app-store || record_result app-store ok "on"
+  if wait_for_network; then
+    if module_on vendor-installers; then
+      run_vendor_installers
+    fi
+    if module_on macos; then
+      if run_apple_updates; then
+        record_result macos ok "macOS $(sw_vers -productVersion)"
+      else
+        record_result macos failed "see $LOG"
+      fi
+    fi
+  else
+    ! module_on vendor-installers || record_result vendor-installers deferred "no network"
+    ! module_on macos || record_result macos deferred "no network"
+  fi
+  publish_results
+  log "finished; macOS $(sw_vers -productVersion)"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  [ -n "${MS_CLEAN_ENV:-}" ] || exec /usr/bin/env -i MS_CLEAN_ENV=1 HOME=/var/root /bin/bash "$0" "$@"
+  main "$@"
+fi

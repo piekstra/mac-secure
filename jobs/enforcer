@@ -1,0 +1,92 @@
+#!/bin/bash
+# Restarts apps that still run old code after an update has landed on disk.
+# Usage: enforcer [app name]   (no argument checks every listed app)
+#
+# Signals and `open` only: AppleScript from a launchd job raises an Automation permission prompt.
+
+set -u
+export LC_ALL=C PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=lib/common.sh
+. "$ROOT/lib/common.sh"
+
+GRACE_SECONDS=${GRACE_SECONDS:-$(ms_config_int GRACE_SECONDS 1800)}
+# Instances with their own profile are automation. Short ones are left alone so a script in
+# progress is not killed; ones running this long are forgotten sessions.
+AUTOMATION_MIN_AGE_SECONDS=${AUTOMATION_MIN_AGE_SECONDS:-$(ms_config_int AUTOMATION_MIN_AGE_SECONDS 86400)}
+
+STATE="$MS_STATE_DIR/stale"
+LOG="$MS_LOG_DIR/enforcer.log"
+mkdir -p "$STATE" "$MS_LOG_DIR"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG"; }
+
+stop_process() {
+  local pid=$1 waited=0
+  kill -TERM "$pid" 2>/dev/null
+  while kill -0 "$pid" 2>/dev/null && [ $waited -lt 30 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+  return 0
+}
+
+check_app() {
+  local name=$1 app=$2 binary="$2/Contents/MacOS/$3" relaunch_args=$4
+  local updated_at now pid dow month day clock year rest started marker first_seen
+  [ -f "$app/Contents/Info.plist" ] || return 0
+  updated_at=$(stat -f %m "$app/Contents/Info.plist")
+  now=$(date +%s)
+
+  while read -r pid dow month day clock year rest; do
+    case "$rest" in
+      "$binary"|"$binary "*) ;;
+      *) continue ;;
+    esac
+    started=$(date -j -f '%a %b %e %T %Y' "$dow $month $day $clock $year" +%s 2>/dev/null) || continue
+    [ "$started" -lt "$updated_at" ] || continue
+
+    case "$rest" in
+      *--user-data-dir=*|*" -profile "*)
+        if [ $((now - started)) -ge "$AUTOMATION_MIN_AGE_SECONDS" ]; then
+          log "stopping stale $name automation instance pid=$pid started=$started updated=$updated_at"
+          stop_process "$pid"
+        fi
+        continue
+        ;;
+    esac
+
+    marker="$STATE/$name.$pid"
+    if [ ! -f "$marker" ]; then
+      echo "$now" >"$marker"
+      log "stale $name pid=$pid started=$started updated=$updated_at; restart due in ${GRACE_SECONDS}s"
+      [ "$GRACE_SECONDS" -eq 0 ] || ms_notify "$name will restart" "An update is installed. $name restarts in $((GRACE_SECONDS / 60)) minutes."
+    fi
+    first_seen=$(cat "$marker")
+    if [ $((now - first_seen)) -ge "$GRACE_SECONDS" ]; then
+      log "restarting $name pid=$pid"
+      stop_process "$pid"
+      rm -f "$marker"
+      # shellcheck disable=SC2086
+      "${MS_OPEN:-open}" -a "$app" --args $relaunch_args
+      log "restarted $name; now $(defaults read "$app/Contents/Info" CFBundleShortVersionString 2>/dev/null)"
+    fi
+  done <<EOF
+$(ps -U "$(id -u)" -ww -o pid=,lstart=,command=)
+EOF
+
+  for marker in "$STATE/$name".*; do
+    [ -f "$marker" ] || continue
+    kill -0 "${marker##*.}" 2>/dev/null || rm -f "$marker"
+  done
+}
+
+list="$MS_CONFIG_DIR/restart-apps.txt"
+[ -f "$list" ] || list="$ROOT/config/restart-apps.default"
+while IFS='|' read -r name app binary args; do
+  case "$name" in ''|\#*) continue ;; esac
+  [ -z "${1:-}" ] || [ "$1" = "$name" ] || continue
+  check_app "$name" "$app" "$binary" "$args"
+done <"$list"

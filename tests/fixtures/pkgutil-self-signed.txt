@@ -1,0 +1,6 @@
+Package "installer.pkg":
+   Status: signed by untrusted certificate
+   Certificate Chain:
+    1. Developer ID Installer: Example Vendor, Inc. (ABCDE12345)
+       SHA256 Fingerprint:
+           33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33

@@ -1,0 +1,1 @@
+{"token":"example","version":"2.0.0","url":"https://downloads.example.com/2.0.0/arm64/example.pkg","sha256":"aaaa","variations":{"sequoia":{"url":"https://downloads.example.com/2.0.0/x86/example.pkg","sha256":"bbbb"},"tahoe":{"url":"https://downloads.example.com/2.0.0/x86/example.pkg","sha256":"bbbb"}}}

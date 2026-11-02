@@ -1,0 +1,29 @@
+# Copy to ~/.config/mac-secure/config. One KEY=value per line. The file is read, never sourced.
+
+# Run the daily job at this time. launchd runs it on wake if the Mac slept through it.
+#DAILY_HOUR=4
+#DAILY_MINUTE=15
+
+# Run the root job at this hour. The Mac wakes 5 minutes before it.
+#MACOS_HOUR=3
+
+# Seconds between the warning and a browser restart.
+#GRACE_SECONDS=1800
+# Seconds between enforcer checks.
+#ENFORCER_INTERVAL=900
+# Stop a browser instance with its own profile only after it has run this many seconds.
+#AUTOMATION_MIN_AGE_SECONDS=86400
+
+# Below MIN_FREE_GIB the daily job clears tool caches. Below HARD_MIN_FREE_GIB it defers updates.
+#MIN_FREE_GIB=15
+#HARD_MIN_FREE_GIB=6
+
+# Directories to search for tools before the standard ones, separated by colons.
+#EXTRA_PATH=
+
+# Run on each binary cargo-local builds, before it replaces the installed one.
+#CARGO_LOCAL_SIGN_COMMAND=
+
+# The Python whose Playwright package is kept current, and the browsers to install.
+#PLAYWRIGHT_PYTHON=python3
+#PLAYWRIGHT_BROWSERS=chromium

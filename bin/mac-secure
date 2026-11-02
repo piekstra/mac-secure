@@ -1,0 +1,397 @@
+#!/bin/bash
+# Exit status: 0 done, 1 a module failed, 2 usage or a refused request, 3 a root step needs a person at a terminal.
+
+set -u
+
+self=$0
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case "$target" in
+    /*) self=$target ;;
+    *) self=$(dirname "$self")/$target ;;
+  esac
+done
+ROOT=$(cd "$(dirname "$self")/.." && pwd)
+
+# shellcheck source=lib/common.sh
+. "$ROOT/lib/common.sh"
+# shellcheck source=lib/modules.sh
+. "$ROOT/lib/modules.sh"
+# shellcheck source=lib/status.sh
+. "$ROOT/lib/status.sh"
+# shellcheck source=lib/audit.sh
+. "$ROOT/lib/audit.sh"
+# shellcheck source=lib/install.sh
+. "$ROOT/lib/install.sh"
+
+PATH=$(ms_tool_path)
+export PATH
+
+EXIT_NEEDS_TERMINAL=3
+
+usage() {
+  cat <<'EOF'
+mac-secure keeps a Mac updated and reports on its security settings.
+
+Read-only, never prompts:
+  mac-secure status [--json]          Security settings, jobs, and each module's last result
+  mac-secure audit [--json]           Findings about this Mac, most severe first
+  mac-secure modules [--json]         Every module, what it does, what it can disrupt
+  mac-secure logs [daily|enforcer|root] [-n <lines>]
+  mac-secure version
+
+Changes this Mac:
+  mac-secure enable <module>... | --recommended [--yes]
+  mac-secure disable <module>... [--yes]
+  mac-secure run [module...]          Run enabled modules, or the named ones, now
+  mac-secure refresh [--yes]          Show what changed, then install this checkout's jobs
+  mac-secure uninstall [--purge] [--yes]
+
+Root modules run sudo, which asks for your password in the terminal. mac-secure never reads or
+stores it. Without a terminal, these commands print the command to run and exit 3.
+EOF
+}
+
+require_macos() {
+  [ "$(uname -s)" = Darwin ] || ms_die "this command needs macOS"
+}
+
+confirm() {
+  local answer
+  if [ ! -t 0 ]; then
+    ms_die "$1 Nothing was changed. Pass --yes to go ahead without a prompt."
+  fi
+  printf '%s [y/N] ' "$1"
+  read -r answer
+  case "$answer" in
+    y|Y|yes) return 0 ;;
+    *) echo "Nothing was changed."; exit 0 ;;
+  esac
+}
+
+# Runs the root installer through sudo, or prints the command when no person is there to authenticate.
+root_step() {
+  local args
+  args=(/bin/bash "$ROOT/root/install-root.sh" --hour "$(ms_config_int MACOS_HOUR 3)" --vendors "$MS_CONFIG_DIR/vendor-installers.txt" "$@")
+  if [ -t 0 ]; then
+    "$MS_SUDO" "${args[@]}"
+    return
+  fi
+  printf 'This step needs root, so it needs you at a terminal. Run:\n\n  %s' "$MS_SUDO"
+  printf ' %q' "${args[@]}"
+  printf '\n\n'
+  return "$EXIT_NEEDS_TERMINAL"
+}
+
+print_plan() {
+  local id
+  for id in "$@"; do
+    printf '%-18s %s\n%19s%s\n' "$id" "$(ms_module_field "$id" 5)" "" "Can disrupt: $(ms_module_field "$id" 6)"
+  done
+}
+
+# A module that adds to `macos` does nothing without it.
+with_requirements() {
+  local id
+  for id in "$@"; do
+    case "$id" in macos-unattended|macos-major) echo macos ;; esac
+    echo "$id"
+  done | awk '!seen[$0]++'
+}
+
+# Disabling `macos` takes the modules that add to it along.
+with_dependents() {
+  local id
+  for id in "$@"; do
+    echo "$id"
+    case "$id" in macos) printf 'macos-unattended\nmacos-major\n' ;; esac
+  done | awk '!seen[$0]++'
+}
+
+ids_for_scope() {
+  local scope=$1 id
+  shift
+  for id in "$@"; do
+    [ "$(ms_module_field "$id" 2)" != "$scope" ] || printf '%s ' "$id"
+  done
+}
+
+cmd_enable() {
+  local yes=0 ids="" arg id user_ids root_ids
+  for arg in "$@"; do
+    case "$arg" in
+      --yes|-y) yes=1 ;;
+      --recommended) ids="$ids $(ms_recommended_ids | tr '\n' ' ')" ;;
+      -*) ms_die "unknown option: $arg" ;;
+      *)
+        ms_module_exists "$arg" || ms_die "unknown module: $arg. See: mac-secure modules"
+        ids="$ids $arg"
+        ;;
+    esac
+  done
+  [ -n "$ids" ] || ms_die "name the modules to enable, or pass --recommended. See: mac-secure modules"
+  require_macos
+  # shellcheck disable=SC2086
+  ids=$(with_requirements $ids | tr '\n' ' ')
+  # shellcheck disable=SC2086
+  print_plan $ids
+  echo
+  [ "$yes" -eq 1 ] || confirm "Enable these modules?"
+
+  # shellcheck disable=SC2086
+  user_ids=$(ids_for_scope user $ids)
+  # shellcheck disable=SC2086
+  root_ids=$(ids_for_scope root $ids)
+  for id in $user_ids; do
+    ms_enabled_add "$id"
+    echo "enabled $id"
+  done
+  [ -z "$user_ids" ] || ms_sync_user_jobs
+  if [ -n "$root_ids" ]; then
+    # shellcheck disable=SC2086
+    root_step enable $root_ids
+    return
+  fi
+}
+
+cmd_disable() {
+  local yes=0 ids="" arg id user_ids root_ids
+  for arg in "$@"; do
+    case "$arg" in
+      --yes|-y) yes=1 ;;
+      -*) ms_die "unknown option: $arg" ;;
+      *)
+        ms_module_exists "$arg" || ms_die "unknown module: $arg. See: mac-secure modules"
+        ids="$ids $arg"
+        ;;
+    esac
+  done
+  [ -n "$ids" ] || ms_die "name the modules to disable. See: mac-secure modules"
+  require_macos
+  # shellcheck disable=SC2086
+  ids=$(with_dependents $ids | tr '\n' ' ')
+  [ "$yes" -eq 1 ] || confirm "Disable: $ids?"
+
+  # shellcheck disable=SC2086
+  user_ids=$(ids_for_scope user $ids)
+  # Every named root module goes through, because an account can outlive its entry in root.conf.
+  root_ids=""
+  if [ -f "$MS_ROOT_LIBEXEC/macos-update" ]; then
+    # shellcheck disable=SC2086
+    root_ids=$(ids_for_scope root $ids)
+  fi
+  for id in $user_ids; do
+    ms_enabled_remove "$id"
+    echo "disabled $id"
+  done
+  [ -z "$user_ids" ] || ms_sync_user_jobs
+  if [ -n "$root_ids" ]; then
+    # shellcheck disable=SC2086
+    root_step disable $root_ids
+    return
+  fi
+}
+
+installed_job() {
+  if [ -x "$MS_APP_DIR/jobs/$1" ]; then
+    echo "$MS_APP_DIR/jobs/$1"
+  else
+    echo "$ROOT/jobs/$1"
+  fi
+}
+
+print_last_run() {
+  [ -f "$MS_STATE_DIR/last-run.tsv" ] || return 0
+  awk -F'\t' '{printf "%-18s %-9s %6ss  %s\n", $2, $3, $4, $5}' "$MS_STATE_DIR/last-run.tsv"
+}
+
+any_module_failed() {
+  awk -F'\t' '$3=="failed"{found=1} END{exit !found}' "$MS_STATE_DIR/last-run.tsv" 2>/dev/null
+}
+
+cmd_run() {
+  local id daily_ids="" run_enforcer=0 run_root=0
+  for id in "$@"; do
+    ms_module_exists "$id" || ms_die "unknown module: $id. See: mac-secure modules"
+    if [ "$(ms_module_field "$id" 2)" = root ]; then
+      run_root=1
+    elif [ "$id" = browsers ]; then
+      run_enforcer=1
+    else
+      daily_ids="$daily_ids $id"
+    fi
+  done
+  require_macos
+  if [ $# -eq 0 ]; then
+    "$(installed_job daily)"
+    ! ms_user_enabled browsers || run_enforcer=1
+    ! [ -f "$MS_ROOT_CONF" ] || run_root=1
+  elif [ -n "$daily_ids" ]; then
+    # shellcheck disable=SC2086
+    "$(installed_job daily)" $daily_ids
+  fi
+  print_last_run
+  [ "$run_enforcer" -eq 0 ] || "$(installed_job enforcer)"
+  if [ "$run_root" -eq 0 ]; then
+    [ -z "$daily_ids" ] && [ $# -gt 0 ] && return 0
+    any_module_failed && return 1
+    return 0
+  fi
+  [ -x "$MS_ROOT_LIBEXEC/macos-update" ] || ms_die "the root job is not installed. Run: mac-secure enable macos"
+  if [ -t 0 ]; then
+    "$MS_SUDO" "$MS_INSTALLED_ROOT_JOB" --no-restart
+    tail -25 "$MS_ROOT_LOG"
+    return
+  fi
+  printf 'The root job needs you at a terminal. Run:\n\n  %s %s --no-restart\n\n' "$MS_SUDO" "$MS_INSTALLED_ROOT_JOB"
+  return "$EXIT_NEEDS_TERMINAL"
+}
+
+cmd_refresh() {
+  local yes=0 arg changes
+  for arg in "$@"; do
+    case "$arg" in
+      --yes|-y) yes=1 ;;
+      *) ms_die "unknown option: $arg" ;;
+    esac
+  done
+  require_macos
+  ms_sync_user_jobs
+  echo "installed the per-user jobs from $ROOT"
+  case "$(ms_root_job_state)" in
+    not-installed) ;;
+    current) echo "the root job is current" ;;
+    *)
+      # A process running as you can edit this checkout, so what goes in as root is shown first.
+      changes=$(ms_root_job_changes)
+      printf 'The root job would change:\n\n%s\n\n' "$changes"
+      if [ -t 0 ] && [ "$yes" -eq 0 ]; then
+        confirm "Install this as root?"
+      fi
+      root_step refresh
+      return
+      ;;
+  esac
+}
+
+cmd_logs() {
+  local which=daily lines=50 newest="" file
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n)
+        [ $# -ge 2 ] || ms_die "-n needs a number"
+        lines=$2
+        shift 2
+        ;;
+      daily|enforcer|root)
+        which=$1
+        shift
+        ;;
+      *) ms_die "unknown log: $1. Choose daily, enforcer or root." ;;
+    esac
+  done
+  case "$lines" in ''|*[!0-9]*) ms_die "-n needs a number" ;; esac
+  case "$which" in
+    enforcer) newest="$MS_LOG_DIR/enforcer.log" ;;
+    root) newest="$MS_ROOT_LOG" ;;
+    *)
+      # Run logs are named by start time, so the last match in glob order is the newest.
+      for file in "$MS_LOG_DIR"/2*.log; do
+        [ -f "$file" ] && newest=$file
+      done
+      ;;
+  esac
+  [ -n "$newest" ] && [ -f "$newest" ] || ms_die "no $which log yet"
+  tail -n "$lines" "$newest"
+}
+
+cmd_uninstall() {
+  local purge=0 yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --purge) purge=1 ;;
+      --yes|-y) yes=1 ;;
+      *) ms_die "unknown option: $arg" ;;
+    esac
+  done
+  require_macos
+  if [ "$purge" -eq 1 ]; then
+    [ "$yes" -eq 1 ] || confirm "Remove every job, and your mac-secure settings and logs?"
+  else
+    [ "$yes" -eq 1 ] || confirm "Remove every job? Your settings and logs stay."
+  fi
+  ms_remove_agent daily
+  ms_remove_agent enforcer
+  ms_clear_browser_policy
+  rm -rf "$MS_APP_DIR"
+  if [ "$purge" -eq 1 ]; then
+    rm -rf "$MS_CONFIG_DIR" "$MS_STATE_DIR" "$MS_LOG_DIR"
+  fi
+  echo "removed the per-user jobs"
+  if [ -f "$MS_ROOT_LIBEXEC/macos-update" ]; then
+    root_step uninstall
+    return
+  fi
+}
+
+cmd_modules() {
+  local id first=1
+  if [ "${1:-}" = --json ]; then
+    printf '['
+    for id in $(ms_module_ids); do
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      printf '{"id":"%s","scope":"%s","recommended":"%s","enabled":"%s","available":"%s","summary":%s,"disruption":%s}' \
+        "$id" "$(ms_module_field "$id" 2)" "$(ms_module_field "$id" 4)" \
+        "$(ms_yes_no ms_module_enabled "$id")" "$(ms_yes_no ms_module_available "$id")" \
+        "$(ms_json_string "$(ms_module_field "$id" 5)")" "$(ms_json_string "$(ms_module_field "$id" 6)")"
+    done
+    printf ']\n'
+    return
+  fi
+  printf '%-18s %-5s %-12s %-8s %s\n' MODULE SCOPE RECOMMENDED ENABLED SUMMARY
+  for id in $(ms_module_ids); do
+    printf '%-18s %-5s %-12s %-8s %s\n' "$id" "$(ms_module_field "$id" 2)" "$(ms_module_field "$id" 4)" \
+      "$(ms_yes_no ms_module_enabled "$id")" "$(ms_module_field "$id" 5)"
+    printf '%45sCan disrupt: %s\n' "" "$(ms_module_field "$id" 6)"
+  done
+}
+
+cmd_status() {
+  require_macos
+  if [ "${1:-}" = --json ]; then
+    ms_status_json
+  else
+    ms_status_text
+  fi
+}
+
+cmd_audit() {
+  require_macos
+  AUDIT_FILE=$(mktemp "${TMPDIR:-/tmp}/mac-secure-audit.XXXXXX")
+  trap 'rm -f "$AUDIT_FILE"' EXIT
+  ms_audit_collect "$AUDIT_FILE"
+  if [ "${1:-}" = --json ]; then
+    ms_audit_json "$AUDIT_FILE"
+  else
+    ms_audit_text "$AUDIT_FILE"
+  fi
+}
+
+command=${1:-}
+[ $# -eq 0 ] || shift
+case "$command" in
+  status) cmd_status "$@" ;;
+  audit) cmd_audit "$@" ;;
+  modules) cmd_modules "$@" ;;
+  enable) cmd_enable "$@" ;;
+  disable) cmd_disable "$@" ;;
+  run) cmd_run "$@" ;;
+  refresh) cmd_refresh "$@" ;;
+  logs) cmd_logs "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  version|--version) echo "mac-secure $MS_VERSION" ;;
+  help|--help|-h) usage ;;
+  '') usage; exit 2 ;;
+  *) ms_die "unknown command: $command. See: mac-secure help" ;;
+esac

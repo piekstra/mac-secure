@@ -1,0 +1,4 @@
+1 extension(s)
+--- com.apple.system_extension.network_extension (Go to System Settings)
+enabled	active	teamID	bundleID (version)	name	[state]
+*	*	ABCDE12345	com.example.networkextension (1.0.0/100)	example	[activated enabled]
