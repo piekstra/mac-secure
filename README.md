@@ -121,12 +121,14 @@ Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes 
 
 `make verify` runs what CI runs: `shellcheck`, `actionlint`, and `tests/run.sh`. The tests are plain shell, with stubs on `PATH` for every tool that changes a system. Scripts must run under the macOS `/bin/bash`, which is version 3.2.
 
+Pull requests run on Linux only. The macOS job runs on `main` and on manual runs. When hosted macOS arm64 runners have no capacity, the job is cancelled after 15 minutes with no steps run; a manual run can pick another runner: `gh workflow run ci --ref <branch> -f macos-runner=macos-15-intel`.
+
 ## Coverage gaps
 
 - Automated tests stub `softwareupdate`, `launchctl`, `sudo`, and `sysadminctl`. Nothing automated runs the root job as root, creates the service account, or restarts a Mac.
 - Not verified: `feed-password.exp` against the real `sysadminctl` as root. It is tested against a stand-in. `-addUser` shows its prompt only to root, so its wording is unknown, and that step answers any password prompt. A failure there ends in the secure-token check, which removes the account.
 - Not verified: whether a restart started by `softwareupdate --restart` unlocks FileVault. If it does not, the Mac waits at the unlock screen.
-- Not verified on real hardware: Intel Macs, including the Intel selection in `vendor-installers`.
+- On Intel, the test suite, `status`, and `audit` pass on a `macos-15-intel` CI runner. No vendor package has been installed on an Intel Mac.
 - Not verified: `RelaunchNotification` policy on Edge and Brave. It is the same Chromium policy as Chrome.
 - Without root, `audit` sees only the current user's listening processes.
 - `kMDItemLastUsedDate` is unreliable after an app is reinstalled, so `audit` makes no claim about when an app was last used.

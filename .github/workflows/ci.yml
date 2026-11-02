@@ -21,7 +21,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker://rhysd/actionlint:1.7.12
       - run: make verify
 
@@ -31,7 +31,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ${{ inputs.macos-runner || 'macos-15' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: /bin/bash tests/run.sh
       - run: ./bin/mac-secure status
       - run: ./bin/mac-secure audit
