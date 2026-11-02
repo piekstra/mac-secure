@@ -202,6 +202,13 @@ valid_vendor_line() {
   printf '%s\n' "$1" | grep -qE '^[a-z0-9][a-z0-9@.+-]*\|[A-Z0-9]{10}$'
 }
 
+# plutil can print its error to stdout, so a failed read must print nothing.
+plist_value() {
+  local value
+  value=$(plutil -extract "$2" raw -o - "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$value"
+}
+
 # Homebrew's top-level fields describe the arm64 build. Intel builds that differ are under
 # variations.<macOS codename>, and a cask with one installer for both has no such entry.
 # Usage: cask_field <json file> <field>
@@ -215,9 +222,9 @@ cask_field() {
       13) codename=ventura ;;
       *) codename=monterey ;;
     esac
-    plutil -extract "variations.$codename.$field" raw -o - "$json" 2>/dev/null && return 0
+    plist_value "$json" "variations.$codename.$field" && return 0
   fi
-  plutil -extract "$field" raw -o - "$json"
+  plist_value "$json" "$field"
 }
 
 https_get() {

@@ -77,11 +77,11 @@ audit_sharing() {
 
 launch_item_program() {
   local plist=$1 program script
-  program=$(plutil -extract Program raw -o - "$plist" 2>/dev/null) ||
-    program=$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null) || return 1
+  program=$(ms_plist_value "$plist" Program) ||
+    program=$(ms_plist_value "$plist" ProgramArguments.0) || return 1
   case "$program" in
     /bin/sh|/bin/bash|/bin/zsh)
-      script=$(plutil -extract ProgramArguments.1 raw -o - "$plist" 2>/dev/null) && program=$script
+      script=$(ms_plist_value "$plist" ProgramArguments.1) && program=$script
       ;;
   esac
   printf '%s' "$program"
@@ -140,7 +140,7 @@ audit_apps() {
     fi
     [ "$arch" = arm64 ] || continue
     [ -f "$app/Contents/Info.plist" ] || continue
-    executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist" 2>/dev/null) || continue
+    executable=$(ms_plist_value "$app/Contents/Info.plist" CFBundleExecutable) || continue
     [ -f "$app/Contents/MacOS/$executable" ] || continue
     case "$(file -b "$app/Contents/MacOS/$executable")" in
       *x86_64*)

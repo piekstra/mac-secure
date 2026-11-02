@@ -57,7 +57,7 @@ $MS_MODULE_TABLE
 EOF
 }
 
-ms_module_exists() { ms_module_ids | grep -qxF "$1"; }
+ms_module_exists() { [ -n "$(ms_module_field "$1" 1)" ]; }
 
 ms_module_available() {
   local tool

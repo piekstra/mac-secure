@@ -77,8 +77,15 @@ ms_path_is_root_only() {
   [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $((0$(stat -f %Lp "$1") & 022)) -eq 0 ]
 }
 
+# plutil can print its error to stdout, so a failed read must print nothing.
+ms_plist_value() {
+  local value
+  value=$(plutil -extract "$2" raw -o - "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$value"
+}
+
 ms_installed_root_hour() {
-  plutil -extract StartCalendarInterval.Hour raw -o - "$MS_ROOT_PLIST" 2>/dev/null
+  ms_plist_value "$MS_ROOT_PLIST" StartCalendarInterval.Hour
 }
 
 # Prints what `refresh` would change in the root job, and nothing when it matches this checkout.
