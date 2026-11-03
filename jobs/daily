@@ -240,24 +240,54 @@ nvm_script() {
   echo "$prefix/opt/nvm/nvm.sh"
 }
 
-# Runs install-latest-npm for one Node, and puts the previous npm back if the new one does not run:
-# the choice comes from a table inside nvm, which an old nvm may not have for a newer npm.
-# Usage: nvm_update_npm <nvm.sh> <nvm dir> <version>
+# Whether a Node's own npm runs on that Node. npm's launcher finds node on PATH, which may be another
+# Node or none, so this calls the Node directly. Usage: npm_runs <Node folder>
+npm_runs() {
+  "$1/bin/node" "$1/lib/node_modules/npm/bin/npm-cli.js" --version >/dev/null 2>&1
+}
+
+# Swaps the copy kept beside npm back in, keeping the replaced npm until the swap is done.
+# Usage: npm_restore <node_modules folder>
+npm_restore() {
+  local modules=$1
+  rm -rf "$modules/.npm.mac-secure-replaced"
+  if [ -e "$modules/npm" ]; then
+    mv "$modules/npm" "$modules/.npm.mac-secure-replaced" || return 1
+  fi
+  if ! mv "$modules/.npm.mac-secure-previous" "$modules/npm"; then
+    mv "$modules/.npm.mac-secure-replaced" "$modules/npm" 2>/dev/null
+    return 1
+  fi
+  rm -rf "$modules/.npm.mac-secure-replaced"
+}
+
+# Runs install-latest-npm for one Node, and puts the previous npm back if the new one does not run
+# there: nvm picks from a table inside it, which an old nvm may not have for a newer npm. The copy
+# sits beside npm, so the swap is a rename on one volume, and a copy that a stopped run left behind
+# is dealt with first. Usage: nvm_update_npm <nvm.sh> <nvm dir> <version>
 nvm_update_npm() {
-  local script=$1 dir=$2 version=$3 root backup rc
-  root="$dir/versions/node/$version"
-  backup=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-npm.XXXXXX") || return 1
-  cp -Rp "$root/lib/node_modules/npm" "$backup/npm" || { rm -rf "$backup"; return 1; }
+  local script=$1 dir=$2 version=$3 node modules previous rc
+  node="$dir/versions/node/$version"
+  modules="$node/lib/node_modules"
+  previous="$modules/.npm.mac-secure-previous"
+  if [ -d "$previous" ]; then
+    if npm_runs "$node"; then
+      rm -rf "$previous"
+    else
+      echo "npm on $version does not run; putting back the copy an earlier run kept"
+      npm_restore "$modules" || { echo "could not put back $previous"; return 1; }
+    fi
+  fi
+  cp -Rp "$modules/npm" "$previous" || { rm -rf "$previous"; return 1; }
   # shellcheck disable=SC1090
   ( export NVM_DIR="$dir"; . "$script" --no-use && nvm use --silent "$version" && nvm install-latest-npm )
   rc=$?
-  if "$root/bin/npm" --version >/dev/null 2>&1; then
-    rm -rf "$backup"
+  if npm_runs "$node"; then
+    rm -rf "$previous"
     return "$rc"
   fi
   echo "npm on $version does not run after nvm install-latest-npm; putting the previous npm back"
-  rm -rf "$root/lib/node_modules/npm" && mv "$backup/npm" "$root/lib/node_modules/npm"
-  rm -rf "$backup"
+  npm_restore "$modules" || echo "could not put back $previous"
   return 1
 }
 
@@ -298,8 +328,12 @@ ch_npm() {
   fi
   if [ -n "$nvm_bin" ]; then
     nvm_note="; nvm default $version"
-    PATH="$nvm_bin:$PATH" npm_config_engine_strict=true upgrade_npm_globals npm || unchecked="$unchecked nvm $version"
-    nvm_update_npm "$script" "$dir" "$version" || NPM_FAILED="$NPM_FAILED npm($version)"
+    # A check that could not run, such as offline after a wake, means npm is not touched either.
+    if PATH="$nvm_bin:$PATH" npm_config_engine_strict=true upgrade_npm_globals npm; then
+      nvm_update_npm "$script" "$dir" "$version" || NPM_FAILED="$NPM_FAILED npm($version)"
+    else
+      unchecked="$unchecked nvm $version"
+    fi
   fi
   if [ "$used" -eq 0 ]; then
     detail "not in use"

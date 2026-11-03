@@ -454,6 +454,13 @@ nvm() {
   esac
 }
 EOF
+  # npm_runs calls node with npm-cli.js; this node runs npm unless the npm folder is marked broken.
+  mkdir -p "$root/lib/node_modules/npm/bin"
+  cat >"$root/bin/node" <<'EOF'
+#!/bin/bash
+[ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0
+EOF
+  chmod +x "$root/bin/node"
   cat >"$root/bin/npm" <<'EOF'
 #!/bin/bash
 printf 'nvm-npm %s engine_strict=%s\n' "$*" "${npm_config_engine_strict:-}" >>"$CALLS"
@@ -488,13 +495,35 @@ test_npm_updates_nvm_default_node_and_leaves_npm_to_nvm() {
 test_npm_puts_back_an_npm_that_does_not_run_after_nvm_updates_it() {
   nvm_setup
   stub npm 'exit 0'
-  export NVM_NPM_BREAKS=1 TMPDIR="$TMP/tmp"
-  mkdir -p "$TMPDIR"
+  export NVM_NPM_BREAKS=1
   run_daily npm
   assert_eq failed "$(result_of npm)"
   assert_contains "$(detail_of npm)" "failed: npm(v20.0.0)"
-  [ ! -e "$HOME/.nvm/versions/node/v20.0.0/lib/node_modules/npm/broken" ] || fail "the npm that does not run was left in place"
-  assert_eq "" "$(find "$TMPDIR" -maxdepth 1 -name 'mac-secure-npm.*' 2>/dev/null)" "backup left behind"
+  local modules="$HOME/.nvm/versions/node/v20.0.0/lib/node_modules"
+  [ ! -e "$modules/npm/broken" ] || fail "the npm that does not run was left in place"
+  [ ! -e "$modules/.npm.mac-secure-previous" ] || fail "the kept copy was left behind"
+  [ ! -e "$modules/.npm.mac-secure-replaced" ] || fail "the replaced npm was left behind"
+}
+
+test_npm_puts_back_the_copy_a_stopped_run_left() {
+  nvm_setup
+  stub npm 'exit 0'
+  local modules="$HOME/.nvm/versions/node/v20.0.0/lib/node_modules"
+  cp -Rp "$modules/npm" "$modules/.npm.mac-secure-previous"
+  touch "$modules/.npm.mac-secure-previous/good" "$modules/npm/broken"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  [ -e "$modules/npm/good" ] || fail "the kept copy was not put back"
+  [ ! -e "$modules/npm/broken" ] || fail "the npm that does not run is still in place"
+}
+
+test_npm_offline_nvm_check_defers_without_touching_npm() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_OUTDATED_FAILS=1 NVM_NPM_FAILS=1
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_not_called 'nvm install-latest-npm'
 }
 
 test_npm_nvm_without_a_default_alias_is_named_and_clean() {
