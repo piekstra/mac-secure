@@ -552,6 +552,42 @@ test_eol_uses_the_last_lists_when_a_fetch_fails() {
   assert_contains "$(cat "$EOL_FINDINGS")" "14.21.3"
 }
 
+test_audit_reports_saved_logins_without_their_values() {
+  audit_setup
+  mkdir -p "$HOME/.sfdx" "$HOME/.aws" "$HOME/.config/gh"
+  echo '{"accessToken":"secret-sf"}' >"$HOME/.sfdx/person@example.com.json"
+  echo '{"refreshToken":"secret-sf"}' >"$HOME/.sfdx/other@example.com.json"
+  echo '{"orgs":{}}' >"$HOME/.sfdx/alias.json"
+  printf '[default]\naws_access_key_id = secret-aws\n' >"$HOME/.aws/credentials"
+  touch -t 202001010000 "$HOME/.aws/credentials"
+  printf 'github.com:\n    oauth_token: secret-gh\n' >"$HOME/.config/gh/hosts.yml"
+  printf 'machine example.com login person password secret-netrc\n' >"$HOME/.netrc"
+  stub gh
+  stub aws
+  local out
+  out=$(PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" audit_findings)
+  assert_contains "$out" 'Salesforce CLI org logins in ~/.sfdx: 2, last changed'
+  assert_contains "$out" 'the sf command is not installed'
+  assert_contains "$out" 'security delete-generic-password -s sfdx -a local'
+  assert_contains "$out" 'under OAuth Connected Apps'
+  assert_contains "$out" '"severity":"medium","id":"saved-login","finding":"Long-lived AWS access keys'
+  assert_contains "$out" 'last changed 2020-01-01'
+  assert_contains "$out" '"severity":"low","id":"saved-login","finding":"GitHub CLI token'
+  assert_contains "$out" 'Plain-text logins in ~/.netrc'
+  assert_not_contains "$out" 'secret-'
+  assert_not_contains "$out" 'example.com'
+  assert_not_contains "$out" 'alias'
+}
+
+test_audit_does_not_report_a_login_held_elsewhere() {
+  audit_setup
+  mkdir -p "$HOME/.config/gh" "$HOME/.docker"
+  printf 'github.com:\n    user: person\n' >"$HOME/.config/gh/hosts.yml"
+  printf '{"auths":{"registry.example":{}},"credsStore":"osxkeychain"}\n' >"$HOME/.docker/config.json"
+  printf '//registry.example/:_authToken=$%s\nregistry=https://registry.example\n' '{TOKEN}' >"$HOME/.npmrc"
+  assert_not_contains "$(audit_findings)" 'saved-login'
+}
+
 test_audit_changes_nothing() {
   audit_setup
   audit_findings >/dev/null
