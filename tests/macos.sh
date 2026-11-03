@@ -483,6 +483,23 @@ test_eol_without_any_end_of_life_list_is_retried() {
   assert_contains "$(cat "$EOL_FINDINGS")" "$(printf 'medium\teol-check-incomplete\tThe end-of-life check could not get what it needs for: nodejs python dotnet')"
 }
 
+test_eol_reads_prerelease_versions_and_keeps_an_old_list() {
+  eol_setup
+  mkdir -p "$MS_DOTNET_ROOT/sdk/6.0.100-rc.2.21505.57" "$HOME/.local/share/uv/python/cpython-3.10.1+freethreaded-macos-aarch64-none"
+  run_daily eol
+  local out
+  out=$(cat "$EOL_FINDINGS")
+  assert_contains "$out" ".NET SDK 6.0.100-rc.2.21505.57 at"
+  assert_contains "$out" "Python managed by uv 3.10.1+freethreaded at"
+  touch -t 202001010000 "$HOME/Library/Application Support/mac-secure/eol/nodejs.json"
+  export FETCH_FAILS=1
+  run_daily eol
+  assert_eq deferred "$(result_of eol)"
+  out=$(cat "$EOL_FINDINGS")
+  assert_contains "$out" "Node.js from nvm 14.21.3"
+  assert_contains "$out" "could not get what it needs for: nodejs"
+}
+
 test_eol_reports_cycles_the_list_does_not_name() {
   eol_setup
   mkdir -p "$HOME/.nvm/versions/node/v0.12.18" "$HOME/.nvm/versions/node/v99.0.0" "$HOME/.nvm/versions/node/v1;touch x"
