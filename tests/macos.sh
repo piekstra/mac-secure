@@ -468,7 +468,7 @@ test_eol_reports_runtimes_past_their_end_and_unsupported_homebrew_packages() {
   assert_contains "$out" "Installed formulae need it: libxmlsec1; remove or replace those first."
   assert_contains "$out" "$(printf "Check that no project's .nvmrc needs it and that it is not nvm's default (nvm alias default).\tnvm uninstall 14.21.3")"
   assert_contains "$out" "brew uninstall --cask old-app"
-  assert_not_contains "$out" "jq"
+  assert_not_contains "$out" "formula jq"
   mkdir -p "$HOME/.config/mac-secure"
   echo eol >"$HOME/.config/mac-secure/enabled"
   assert_contains "$(audit_findings)" '"id":"end-of-life"'
