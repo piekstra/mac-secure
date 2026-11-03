@@ -5,6 +5,7 @@
 MS_APPLICATIONS_DIR=${MS_APPLICATIONS_DIR:-/Applications}
 MS_SYSTEM_LIBRARY=${MS_SYSTEM_LIBRARY:-/Library}
 MS_OLD_HELPER_YEARS=3
+MS_SAVED_LOGIN_DAYS=90
 
 # Usage: finding <high|medium|low|info> <id> <what was found> <how to act on it>
 finding() {
@@ -460,6 +461,57 @@ audit_eol() {
   cat "$MS_EOL_RESULTS" >>"$MS_AUDIT_OUT"
 }
 
+# A login a tool keeps on disk is a key that outlives the work it was for. This reads field names only,
+# so no value and no account name reaches the output. A login the tool can no longer use, or one
+# unchanged for MS_SAVED_LOGIN_DAYS, is the kind left behind.
+# Usage: saved_login <command, or -> <what and where> <file> <pattern a login matches, or ""> <action> [<action without the command>]
+saved_login() {
+  local tool=$1 what=$2 file=$3 pattern=$4 action=$5 severity=low state
+  [ -f "$file" ] || return 0
+  [ -z "$pattern" ] || grep -Eq "$pattern" "$file" 2>/dev/null || return 0
+  state="last changed $(date -r "$file" +%Y-%m-%d)"
+  [ -z "$(find "$file" -mtime +"$MS_SAVED_LOGIN_DAYS" 2>/dev/null)" ] || severity=medium
+  if [ "$tool" != - ] && ! command -v "$tool" >/dev/null 2>&1; then
+    severity=medium
+    state="$state, and the $tool command is not installed"
+    action=${6:-$action}
+  fi
+  finding "$severity" saved-login "$what, $state." "$action"
+}
+
+audit_saved_logins() {
+  local file newest="" count=0
+  for file in "$HOME/.sfdx"/*@*.json; do
+    [ -f "$file" ] || continue
+    count=$((count + 1))
+    if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest=$file; fi
+  done
+  [ "$count" -eq 0 ] || saved_login sf "Salesforce CLI org logins in ~/.sfdx: $count" "$newest" "" \
+    "sf org logout --all --no-prompt removes them here. Revoke them too, on your user page in each org under OAuth Connected Apps." \
+    "rm -rf ~/.sfdx ~/.sf, then: security delete-generic-password -s sfdx -a local. Revoke them too, on your user page in each org under OAuth Connected Apps."
+  saved_login aws "Long-lived AWS access keys in ~/.aws/credentials" "$HOME/.aws/credentials" 'aws_access_key_id' \
+    "Deactivate the keys in AWS and remove them from the file. aws sso login gives short-lived logins instead."
+  saved_login gcloud "Google Cloud application default login in ~/.config/gcloud" \
+    "$HOME/.config/gcloud/application_default_credentials.json" 'refresh_token|private_key' \
+    "gcloud auth application-default revoke" "Remove ~/.config/gcloud, and revoke the login in your Google account."
+  saved_login gemini "Gemini CLI login in ~/.gemini/oauth_creds.json" "$HOME/.gemini/oauth_creds.json" "" \
+    "rm ~/.gemini/oauth_creds.json, and revoke the login in your Google account."
+  saved_login gh "GitHub CLI token in plain text in ~/.config/gh/hosts.yml" "$HOME/.config/gh/hosts.yml" 'oauth_token:' \
+    "gh auth logout, then gh auth login to keep the token in the Keychain." "Revoke the token in your GitHub settings and remove the file."
+  saved_login docker "Registry logins in ~/.docker/config.json" "$HOME/.docker/config.json" '"auth"[[:space:]]*:[[:space:]]*"[^"]' \
+    "docker logout <registry>. A credsStore of osxkeychain keeps logins in the Keychain." "Revoke the logins at each registry and remove them from the file."
+  saved_login kubectl "Cluster logins in ~/.kube/config" "$HOME/.kube/config" '^[[:space:]]*(token|password|client-key-data):' \
+    "kubectl config delete-user <name> for each cluster you no longer use." "Remove the file."
+  saved_login npm "Registry tokens in ~/.npmrc" "$HOME/.npmrc" '(_authToken|_password|_auth)[[:space:]]*=[[:space:]]*[^$[:space:]]' \
+    "Revoke the token at the registry and remove the line. Read a token from an environment variable instead."
+  saved_login - "Plain-text logins in ~/.git-credentials" "$HOME/.git-credentials" "" \
+    "Revoke the tokens at each host and remove the file. git config --global credential.helper osxkeychain keeps logins in the Keychain."
+  saved_login - "Plain-text logins in ~/.netrc" "$HOME/.netrc" '(^|[[:space:]])password[[:space:]]' \
+    "Revoke those passwords or tokens and remove them from the file."
+  saved_login - "Index passwords in ~/.pypirc" "$HOME/.pypirc" '^[[:space:]]*password[[:space:]]*[=:]' \
+    "Revoke the token at the index and remove it from the file."
+}
+
 ms_audit_collect() {
   MS_AUDIT_OUT=$1
   audit_core
@@ -477,6 +529,7 @@ ms_audit_collect() {
   audit_homebrew
   audit_vulns
   audit_eol
+  audit_saved_logins
 }
 
 # Most severe first.

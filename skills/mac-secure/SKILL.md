@@ -34,6 +34,10 @@ A session can start with lines beginning `mac-secure:`, from the plugin's start-
 - `vulns-ignore.txt` hides matches from everyone who reads the results. Add a line only for a match the user reviewed and asked to hide.
 - `vuln-scan-stale` or `vuln-scan-missing` means the results are old or absent. Say so rather than reporting the Mac as clean, and read `mac-secure logs daily`.
 
+## Saved logins
+
+`saved-login` names a tool's login kept on disk. Do not open the file: the finding already has what you need, and the file holds a live credential. Ask the user whether the login is still needed and whether it is stored where they keep credentials, such as a password manager, then let them decide per item. Removing a file does not always end the login, so name the revocation step the action gives.
+
 ## End-of-life findings
 
 `end-of-life` and `homebrew-unsupported` name a runtime or package that no longer gets fixes; the finding says what to check first and the action is the command that removes it. `eol-check-incomplete`, `eol-check-stale` and `eol-check-missing` mean the check did not cover everything; say so rather than reporting the Mac as clean. Before proposing removal, look for what uses it: `.nvmrc` files for Node, `pyvenv.cfg` files naming that Python, `global.json` for .NET, and the dependents the finding lists for Homebrew. List what you found and let the user decide per item.

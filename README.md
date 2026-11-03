@@ -126,6 +126,12 @@ A runtime past its end of life gets no more security fixes, and an old one left 
 
 Nothing is removed for you: a project can pin an old Node in `.nvmrc`, a virtual environment can run on an old Python, and `global.json` can name an old .NET SDK. Check those before you remove one.
 
+## Saved logins
+
+Command-line tools keep logins on disk, and a login stays valid after the work it was for has ended, and often after the tool is gone. `audit` reports each one it knows as `saved-login`: Salesforce CLI, AWS access keys, Google Cloud, Gemini CLI, GitHub CLI, Docker, Kubernetes, npm, Git, `.netrc` and `.pypirc`. A login the tool can no longer use, or one unchanged for 90 days, is `medium`; others are `low`. Each finding says how to remove the login. Removing it from disk does not always end it at the service, so the action also says where to revoke it when that is a separate step.
+
+The check reads field names only. It prints the file and the date it last changed, with no value and no account name.
+
 ## Trust model
 
 - The installed root job is a root-owned copy in `/usr/local/libexec/mac-secure`, and it reads only root-owned settings. Once it is installed, a process running as you cannot change what it runs. The installer refuses a path whose parents anyone but root can write to.
@@ -171,6 +177,7 @@ Pull requests run on Linux only. The macOS job runs on `main` and on manual runs
 - On Intel, the test suite, `status`, and `audit` pass on a `macos-15-intel` CI runner. No vendor package has been installed on an Intel Mac.
 - Not verified: `RelaunchNotification` policy on Edge and Brave. It is the same Chromium policy as Chrome.
 - Without root, `audit` sees only the current user's listening processes.
+- `saved-login` looks only in the places those tools keep logins. A key in any other file is not found; a secret scanner such as [gitleaks](https://github.com/gitleaks/gitleaks) covers that.
 - With `PLAYWRIGHT_BROWSERS_PATH=0`, each copy of Playwright keeps its browsers in its own `node_modules`, which `audit` does not check.
 - `vulns` matches an app by the packages and binaries inside it. A vulnerability in an app's own code is reported only when the database names that app, so an app with no match is not proven clean.
 - `kMDItemLastUsedDate` is unreliable after an app is reinstalled, so `audit` makes no claim about when an app was last used.
