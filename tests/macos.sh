@@ -309,12 +309,18 @@ test_audit_finds_playwright_builds_older_than_the_installed_browser() {
   audit_setup
   playwright_cache_setup
   fake_bundle "$MS_APPLICATIONS_DIR/Google Chrome.app" 156.0.8078.80
+  mkdir -p "$HOME/new copy/playwright-core"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); d["browsers"][0].update(revision="1248", browserVersion="156.0.8078.4"); json.dump(d, open(sys.argv[2], "w"), indent=2)' \
+    "$FIXTURES/playwright-browsers.json" "$HOME/new copy/playwright-core/browsers.json"
+  echo "$HOME/new copy/playwright-core" >"$CACHE/.links/ccc"
   local out
   out=$(audit_findings)
   assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than Google Chrome 156"
   assert_contains "$out" "Update or remove the Playwright copies that use it: ~/old copy/playwright-core."
-  assert_not_contains "$out" "(chromium-1248)"
-  assert_contains "$out" "Playwright's Firefox 146.0.1 (firefox-1509) is older than the newest build Playwright has here, 152"
+  assert_contains "$out" '"severity":"low","id":"stale-playwright-browser","finding":"Playwright'"'"'s Chromium 156.0.8078.4 (chromium-1248)'
+  assert_contains "$out" "Playwright's Chromium 156.0.8078.4 (chromium-1248) is older than Google Chrome 156.0.8078.80"
+  assert_contains "$out" "set channel: 'chrome' in their Playwright config."
+  assert_contains "$out" "Playwright's Firefox 146.0.1 (firefox-1509) is older than the newest build Playwright has here, 152.0"
   assert_not_contains "$out" "(firefox-1555)"
 }
 
