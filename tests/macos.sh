@@ -360,6 +360,26 @@ test_audit_does_not_read_a_playwright_copy_in_a_protected_folder() {
   assert_contains "$out" "Which copies use it is unknown, since these copies could not be read: ~/Documents/project/playwright-core."
 }
 
+test_audit_does_not_check_a_playwright_cache_in_a_protected_folder() {
+  audit_setup
+  export PLAYWRIGHT_BROWSERS_PATH="$HOME/Documents/pw-browsers"
+  playwright_cache_setup "$HOME/Documents/pw-browsers"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's browser builds in $HOME/Documents/pw-browsers were not checked"
+  assert_not_contains "$out" "stale-playwright-browser"
+}
+
+test_audit_does_not_call_a_build_unused_when_its_copy_is_on_a_missing_volume() {
+  audit_setup
+  playwright_cache_setup
+  echo "/srv/build/playwright-core" >"$CACHE/.links/aaa"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Which copies use it is unknown, since these copies could not be read: /srv/build/playwright-core."
+  assert_not_contains "$out" "No installed copy of Playwright uses it"
+}
+
 test_audit_checks_a_headless_shell_build_by_its_recorded_version() {
   audit_setup
   playwright_cache_setup
