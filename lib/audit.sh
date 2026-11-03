@@ -337,11 +337,9 @@ audit_vulns() {
     finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
     return 0
   fi
-  if [ -f "$MS_VULN_GAPS" ]; then
-    while IFS=$'\t' read -r what action; do
-      [ -z "$what" ] || finding low vuln-coverage-gap "$what" "$action"
-    done <"$MS_VULN_GAPS"
-  fi
+  cat "$MS_VULN_LOCATION_GAPS" "$MS_VULN_GAPS" 2>/dev/null | while IFS=$'\t' read -r what action; do
+    [ -z "$what" ] || finding low vuln-coverage-gap "$what" "$action"
+  done
   if ! age=$(ms_vuln_scan_age_days); then
     finding medium vuln-scan-stale "No vulnerability scan has finished every location, so some may not have been checked." "mac-secure logs daily, or: mac-secure run vulns"
   elif [ "$age" -gt "$MS_VULN_STALE_DAYS" ]; then

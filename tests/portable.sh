@@ -1096,10 +1096,12 @@ test_vulns_missing_configured_location_keeps_its_results() {
   run_daily vulns
   assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
   rm -r "$TMP/volume"
+  rm "$VULN_DIR/scanned-at"
   run_daily vulns
-  assert_eq deferred "$(result_of vulns)"
-  assert_contains "$(detail_of vulns)" "failed: $TMP/volume/tools"
+  assert_eq ok "$(result_of vulns)"
+  [ -s "$VULN_DIR/scanned-at" ] || fail "a missing configured location held back the stamp"
   assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
+  assert_contains "$(audit_vulns_only)" "$(printf 'low\tvuln-coverage-gap\t%s, from VULN_SCAN_PATHS, was not there to scan' "$TMP/volume/tools")"
 }
 
 test_vulns_output_drops_control_characters() {

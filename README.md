@@ -98,7 +98,7 @@ Everything personal lives in `~/.config/mac-secure/`:
 
 The `vulns` module needs [grype](https://github.com/anchore/grype) and [syft](https://github.com/anchore/syft): `brew install grype syft`. syft lists what is installed, and grype matches it against Anchore's database, which includes GitHub's advisories (malware advisories among them), the NVD, and CISA's list of vulnerabilities known to be exploited. When Homebrew has `brew vulns`, it checks the installed formulae as well; `audit` says when it does not.
 
-grype matches what is installed against the database it downloads from Anchore, on the Mac. `brew vulns` instead sends each formula's package name and version to [OSV.dev](https://google.github.io/osv.dev/api/) (`api.osv.dev`), which can name a formula from a private tap. `VULN_HOMEBREW=no` in `config` leaves formulae out.
+grype matches what is installed against the database it downloads from Anchore, on the Mac. `brew vulns` instead sends each formula's source repository URL and version tag to [OSV.dev](https://google.github.io/osv.dev/api/) (`api.osv.dev`), which can name a private repository or host for a formula from a private tap. `VULN_HOMEBREW=no` in `config` leaves formulae out.
 
 It runs in the daily job after the update modules, so its results describe what the updates left behind. It scans these locations when they exist: Node versions from nvm, Volta and fnm; the npx cache; Bun's global packages; `~/.local`; `~/go/bin`; `~/.cargo/bin`; Playwright's Go drivers; VS Code and Cursor extensions; `~/.claude/plugins`; python.org's Python framework; `/Applications`; and Homebrew's `lib`. `VULN_SCAN_PATHS` in `config` adds more.
 
@@ -110,7 +110,7 @@ How you learn about results:
 - `audit` lists one finding per location with critical or high matches (`vulnerable-software`), one per malware match (`malware-package`), and one counting the lower-severity matches that `mac-secure vulns --all` lists (`lower-vulnerabilities`). It also reports what the scan could not check (`vuln-coverage-gap`), a scan that has not finished in 3 days or a failed database update (`vuln-scan-stale`), a missing tool or result (`vuln-scan-missing`), and a module that is off (`vuln-scan-off`). With the module off, earlier results are not reported, since nothing updates them.
 - `mac-secure vulns` lists each match with the version that fixes it, and `--json` gives the same to a script or an agent.
 
-A location that cannot be scanned keeps its previous results, and the module reports `deferred`, so a failed scan never reads as a clean one. So does a `VULN_SCAN_PATHS` location that is missing, such as an unmounted volume. A failed database update leaves the scan unstamped, so `audit` reports it after 3 days.
+A location that cannot be scanned keeps its previous results, and the module reports `deferred`, so a failed scan never reads as a clean one. A `VULN_SCAN_PATHS` location that is missing, such as an unplugged drive, keeps its previous results too, and `audit` reports it as a `vuln-coverage-gap`. A failed database update leaves the scan unstamped, so `audit` reports it after 3 days.
 
 `mac-secure disable vulns` keeps the results and grype's database. `uninstall --purge` removes the results; `grype db delete` removes the database.
 
@@ -126,6 +126,7 @@ Not covered: Playwright's browser builds, which no scanner here identifies; cont
 - A vendor installer runs only if its download is https, it is a pkg, its sha256 matches Homebrew's published value when one is published, Apple issued its certificate chain, its leaf certificate names the Apple Team ID you pinned, Gatekeeper is on and accepts it, and its version is not older than the one mac-secure last installed.
 - Homebrew's public cask API tells the root job which version and download to fetch. If that API were compromised, it could offer any package the pinned team signed, but nothing else. Pin only vendors you trust with root, and a vendor that changes signing team stops updating until you review and re-pin. A cask without a sha256 relies on the signature checks alone, and one with no version is downloaded on every run to compare it.
 - Third-party taps are not an input to the root job.
+- The `vulns` module's `brew vulns` step sends each formula's source repository URL and version tag to OSV.dev. grype sends nothing about what is installed: it downloads Anchore's database and matches on the Mac. `VULN_HOMEBREW=no` turns the Homebrew step off.
 - `mac-secure` never reads or stores your password. `sudo` and `sysadminctl` prompt for it in the terminal.
 - mac-secure does not update itself. To take a new version, review it, `git pull`, then `mac-secure refresh`.
 
