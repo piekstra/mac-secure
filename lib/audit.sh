@@ -283,8 +283,32 @@ audit_playwright_browsers() {
   esac
 }
 
+# Usage: version_older <a> <b>   true when dotted version a is older than b.
+version_older() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    n = split(a, x, "."); m = split(b, y, ".")
+    for (i = 1; i <= (n > m ? n : m); i++) {
+      if (x[i] + 0 < y[i] + 0) exit 0
+      if (x[i] + 0 > y[i] + 0) exit 1
+    }
+    exit 1
+  }'
+}
+
+# Prints the newest version among the builds of one kind. Usage: newest_build_version <builds> <kind pattern>
+newest_build_version() {
+  printf '%s\n' "$1" | awk -F'|' -v k="$2" '
+    function older(a, b,    x, y, n, m, i) {
+      n = split(a, x, "."); m = split(b, y, ".")
+      for (i = 1; i <= (n > m ? n : m); i++) { if (x[i] + 0 < y[i] + 0) return 1; if (x[i] + 0 > y[i] + 0) return 0 }
+      return 0
+    }
+    $1 ~ k { if (best == "" || older(best, $3)) best = $3 }
+    END { print best }'
+}
+
 audit_playwright_cache() {
-  local cache=$1 builds users unreadable unknown kind build version newest label browser reference installed used_by action
+  local cache=$1 builds users unreadable unknown kind build version newest label browser reference installed used_by action severity
   [ -d "$cache" ] || return 0
   users=$(playwright_build_users "$cache")
   builds=$(playwright_cache_builds "$cache" "$users")
@@ -298,31 +322,38 @@ audit_playwright_cache() {
     case "$kind" in chromium | chromium_headless_shell | firefox) ;; *) continue ;; esac
     if [ "$kind" = firefox ]; then
       label=Firefox browser=Firefox
-      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 == "firefox" { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
+      newest=$(newest_build_version "$builds" '^firefox$')
     else
       label=Chromium browser="Google Chrome"
       [ "$kind" = chromium ] || label="Chromium headless shell"
-      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 ~ /^chromium/ { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
+      newest=$(newest_build_version "$builds" '^chromium')
     fi
-    # The reference is whichever is newer, the installed browser or the newest cached build.
+    # The reference is whichever is newer, the installed browser or the newest cached build, compared
+    # by full version: Chrome ships security fixes in updates within a major version.
     reference="the newest build Playwright has here,"
     installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/$browser.app/Contents/Info.plist" CFBundleShortVersionString) || installed=""
     case "${installed%%.*}" in
       '' | *[!0-9]*) ;;
-      *) if [ "${installed%%.*}" -ge "$newest" ]; then newest=${installed%%.*} reference=$browser; fi ;;
+      *) if ! version_older "$installed" "$newest"; then newest=$installed reference=$browser; fi ;;
     esac
-    [ "${version%%.*}" -lt "$newest" ] || continue
+    version_older "$version" "$newest" || continue
+    severity=medium
+    [ "${version%%.*}" -lt "${newest%%.*}" ] || severity=low
     used_by=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" -v home="$HOME" '
       $1 == b { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
       END { print out }')
-    if [ -n "$used_by" ]; then
+    if [ -n "$used_by" ] && [ "$version" = "$(newest_build_version "$builds" "^$kind\$")" ]; then
+      # The newest build Playwright has is older than the installed browser: no update fixes it yet.
+      action="No newer Playwright build is here yet; one comes with a later Playwright release. Copies that use it: $used_by."
+      [ "$kind" = firefox ] || action="$action To run them on the installed Google Chrome, which updates itself, set channel: 'chrome' in their Playwright config."
+    elif [ -n "$used_by" ]; then
       action="Update or remove the Playwright copies that use it: $used_by. Playwright deletes a build once no copy needs it."
     elif [ -n "$unreadable" ]; then
       action="Which copies use it is unknown, since these copies could not be read: $unreadable. After updating them, npx playwright install deletes builds no copy needs."
     else
       action="No installed copy of Playwright uses it: rm -r '$cache/$build'"
     fi
-    finding medium stale-playwright-browser "Playwright's $label $version ($build) is older than $reference $newest, so it lacks the security fixes released since." "$action"
+    finding "$severity" stale-playwright-browser "Playwright's $label $version ($build) is older than $reference $newest, so it lacks the security fixes released since." "$action"
   done <<EOF
 $builds
 EOF
