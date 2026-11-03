@@ -43,7 +43,7 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `brew-formulae` | you | yes | Upgrades every Homebrew formula | Running services keep old code until they restart |
 | `brew-casks` | you | yes | Upgrades every cask, including apps that claim to update themselves | Closes an app being upgraded, then reopens it |
 | `adopt-apps` | you | no | Moves the apps in `adopt-apps.txt` under Homebrew, so they update while closed | Replaces each app, closing it if running |
-| `npm` | you | yes | Upgrades global npm packages to latest | A new major version can change how a CLI behaves |
+| `npm` | you | yes | Upgrades global npm packages to latest, in the Node on the job's PATH (Homebrew's, or one added with `EXTRA_PATH`) and in nvm's default Node, where nvm picks the npm that runs on it | A new major version can change how a CLI behaves. On nvm's default Node, a release that declares it needs a newer Node is held back, and an npm that does not run after nvm's update is put back |
 | `rust` | you | yes | Updates Rust toolchains and rustup | None |
 | `cargo` | you | yes | Reinstalls crates installed from crates.io | Compiles from source, which can take many minutes |
 | `cargo-local` | you | no | Rebuilds local-source Rust CLIs whose lockfile has a RustSec advisory | Replaces the installed binary with a build of the default branch |
@@ -62,7 +62,7 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `firewall` | root | yes | Keeps the macOS firewall on | An unsigned program that listens beyond this Mac raises an allow dialog |
 | `vendor-installers` | root | no | Keeps the pkg-based apps in `vendor-installers.txt` current | An app can close when its installer runs |
 
-`audit` also reports a Playwright browser build older than the browser installed on the Mac, or than the newest build Playwright has there, with the copies of Playwright that keep it. It checks `~/Library/Caches/ms-playwright` and, when set in the environment of whoever runs `audit`, the folder `PLAYWRIGHT_BROWSERS_PATH` names. A copy under Desktop, Documents, Downloads, iCloud Drive or `/Volumes` is not read, since that can raise a privacy prompt, so the finding says which copies use such a build is unknown. Playwright [deletes a build](https://playwright.dev/docs/browsers#stale-browser-removal) once no installed copy needs it.
+`audit` also reports a Playwright browser build older than the browser installed on the Mac, or than the newest build Playwright has there, with the copies of Playwright that keep it. It checks `~/Library/Caches/ms-playwright` and, when set in the environment of whoever runs `audit`, the folder `PLAYWRIGHT_BROWSERS_PATH` names. A copy or cache under Desktop, Documents, Downloads, Pictures, Music, Movies, iCloud Drive, `~/Library/CloudStorage`, `/Volumes` or a network mount is not read, since that can raise a privacy prompt or reach a volume that is not there, so the finding says which copies use such a build is unknown, or that the cache was not checked. A build whose version cannot be read is reported as `playwright-browser-unreadable`. Playwright [deletes a build](https://playwright.dev/docs/browsers#stale-browser-removal) once no installed copy needs it.
 
 A module whose tool is not installed is skipped until the tool appears, so enabling one you do not use costs nothing.
 
@@ -99,7 +99,7 @@ Everything personal lives in `~/.config/mac-secure/`:
 
 The `vulns` module needs [grype](https://github.com/anchore/grype) and [syft](https://github.com/anchore/syft): `brew install grype syft`. syft lists what is installed, and grype matches it against Anchore's database, which includes GitHub's advisories (malware advisories among them), the NVD, and CISA's list of vulnerabilities known to be exploited. When Homebrew has `brew vulns`, it checks the installed formulae as well; `audit` says when it does not.
 
-grype matches what is installed against the database it downloads from Anchore, on the Mac. `brew vulns` instead sends each formula's package name and version to [OSV.dev](https://google.github.io/osv.dev/api/) (`api.osv.dev`), which can name a formula from a private tap. `VULN_HOMEBREW=no` in `config` leaves formulae out.
+grype matches what is installed against the database it downloads from Anchore, on the Mac. `brew vulns` instead sends each formula's source repository URL and version tag to [OSV.dev](https://google.github.io/osv.dev/api/) (`api.osv.dev`), which can name a private repository or host for a formula from a private tap. `VULN_HOMEBREW=no` in `config` leaves formulae out.
 
 It runs in the daily job after the update modules, so its results describe what the updates left behind. It scans these locations when they exist: Node versions from nvm, Volta and fnm; the npx cache; Bun's global packages; `~/.local`; `~/go/bin`; `~/.cargo/bin`; Playwright's Go drivers; VS Code and Cursor extensions; `~/.claude/plugins`; python.org's Python framework; `/Applications`; and Homebrew's `lib`. `VULN_SCAN_PATHS` in `config` adds more.
 
@@ -111,7 +111,7 @@ How you learn about results:
 - `audit` lists one finding per location with critical or high matches (`vulnerable-software`), one per malware match (`malware-package`), and one counting the lower-severity matches that `mac-secure vulns --all` lists (`lower-vulnerabilities`). It also reports what the scan could not check (`vuln-coverage-gap`), a scan that has not finished in 3 days or a failed database update (`vuln-scan-stale`), a missing tool or result (`vuln-scan-missing`), and a module that is off (`vuln-scan-off`). With the module off, earlier results are not reported, since nothing updates them.
 - `mac-secure vulns` lists each match with the version that fixes it, and `--json` gives the same to a script or an agent.
 
-A location that cannot be scanned keeps its previous results, and the module reports `deferred`, so a failed scan never reads as a clean one. So does a `VULN_SCAN_PATHS` location that is missing, such as an unmounted volume. A failed database update leaves the scan unstamped, so `audit` reports it after 3 days.
+A location that cannot be scanned keeps its previous results, and the module reports `deferred`, so a failed scan never reads as a clean one. A `VULN_SCAN_PATHS` location that is missing, such as an unplugged drive, keeps its previous results too, and `audit` reports it as a `vuln-coverage-gap`. A failed database update leaves the scan unstamped, so `audit` reports it after 3 days.
 
 `mac-secure disable vulns` keeps the results and grype's database. `uninstall --purge` removes the results; `grype db delete` removes the database.
 
@@ -127,6 +127,7 @@ Not covered: Playwright's browser builds, which no scanner here identifies; cont
 - A vendor installer runs only if its download is https, it is a pkg, its sha256 matches Homebrew's published value when one is published, Apple issued its certificate chain, its leaf certificate names the Apple Team ID you pinned, Gatekeeper is on and accepts it, and its version is not older than the one mac-secure last installed.
 - Homebrew's public cask API tells the root job which version and download to fetch. If that API were compromised, it could offer any package the pinned team signed, but nothing else. Pin only vendors you trust with root, and a vendor that changes signing team stops updating until you review and re-pin. A cask without a sha256 relies on the signature checks alone, and one with no version is downloaded on every run to compare it.
 - Third-party taps are not an input to the root job.
+- The `vulns` module's `brew vulns` step sends each formula's source repository URL and version tag to OSV.dev. grype sends nothing about what is installed: it downloads Anchore's database and matches on the Mac. `VULN_HOMEBREW=no` turns the Homebrew step off.
 - `mac-secure` never reads or stores your password. `sudo` and `sysadminctl` prompt for it in the terminal.
 - mac-secure does not update itself. To take a new version, review it, `git pull`, then `mac-secure refresh`.
 

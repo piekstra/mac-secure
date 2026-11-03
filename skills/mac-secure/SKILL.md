@@ -20,7 +20,7 @@ mac-secure notices          # what needs attention now; nothing when nothing doe
 mac-secure logs daily -n 100   # also: enforcer, root
 ```
 
-Report findings with their `action`. For `stale-playwright-browser`, the action names the Playwright copies that keep the old build. Some are cached libraries that a program downloads again when it runs, so ask before removing any. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
+Report findings with their `action`. For `stale-playwright-browser`, the action names the Playwright copies that keep the old build; when none does, it gives an `rm -r` command for the build, and when some copies could not be read it says which are unknown. `playwright-browser-unreadable` lists builds whose version could not be read, and `playwright-cache-not-checked` a cache folder it did not look in. Some of these copies are cached libraries that a program downloads again when it runs, so ask before removing any. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
 
 ## Vulnerability findings
 

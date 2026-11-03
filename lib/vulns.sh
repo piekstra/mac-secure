@@ -12,6 +12,7 @@ MS_VULN_RESULTS="$MS_VULN_DIR/latest.tsv"
 MS_VULN_STAMP="$MS_VULN_DIR/scanned-at"
 MS_VULN_COVERAGE="$MS_VULN_DIR/coverage.txt"
 MS_VULN_GAPS="$MS_VULN_DIR/gaps.tsv"
+MS_VULN_LOCATION_GAPS="$MS_VULN_DIR/gaps-locations.tsv"
 MS_VULN_IGNORE="$MS_CONFIG_DIR/vulns-ignore.txt"
 MS_VULN_FIRST_SEEN="$MS_VULN_DIR/first-seen.tsv"
 MS_VULN_STALE_DAYS=3
@@ -39,7 +40,7 @@ ms_vuln_extra_targets() {
 ms_vuln_default_targets() {
   local prefix
   cat <<EOF
-$HOME/.nvm/versions/node
+$(ms_nvm_dir)/versions/node
 $HOME/.volta/tools
 $HOME/Library/Application Support/fnm
 $HOME/.npm/_npx

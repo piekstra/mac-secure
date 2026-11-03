@@ -433,6 +433,209 @@ test_npm_failed_check_is_deferred_not_ok() {
   assert_contains "$(detail_of npm)" "could not check"
 }
 
+# An nvm in <folder> (default ~/.nvm) whose default alias resolves to v20.0.0, whose npm reports
+# itself, ccusage and newer-node-only outdated. Flags: NVM_DEFAULT replaces the resolved version;
+# NVM_NPM_FAILS fails install-latest-npm; NVM_NPM_BREAKS makes it leave an npm that does not run;
+# NVM_OUTDATED_FAILS fails the outdated check.
+# Usage: nvm_setup [folder]
+nvm_setup() {
+  local dir=${1:-$HOME/.nvm}
+  local root="$dir/versions/node/v20.0.0"
+  mkdir -p "$root/bin" "$root/lib/node_modules/npm" "$dir/alias"
+  echo 20 >"$dir/alias/default"
+  cat >"$dir/nvm.sh" <<'EOF'
+nvm() {
+  printf 'nvm %s\n' "$*" >>"$CALLS"
+  case "$1" in
+    version) echo "${NVM_DEFAULT:-v20.0.0}" ;;
+    install-latest-npm)
+      [ -z "${NVM_NPM_FAILS:-}" ] || return 1
+      [ -z "${NVM_NPM_BREAKS:-}" ] || touch "$NVM_DIR/versions/node/v20.0.0/lib/node_modules/npm/broken" ;;
+  esac
+}
+EOF
+  # npm_runs calls node with npm-cli.js; this node runs npm unless the npm folder is marked broken.
+  mkdir -p "$root/lib/node_modules/npm/bin"
+  cat >"$root/bin/node" <<'EOF'
+#!/bin/bash
+[ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0
+EOF
+  chmod +x "$root/bin/node"
+  cat >"$root/bin/npm" <<'EOF'
+#!/bin/bash
+printf 'nvm-npm %s engine_strict=%s\n' "$*" "${npm_config_engine_strict:-}" >>"$CALLS"
+[ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] || exit 1
+case "$1" in
+  --version) [ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0 ;;
+  outdated)
+    [ -z "${NVM_OUTDATED_FAILS:-}" ] || exit 1
+    echo "/n/lib/node_modules/npm:npm@11.0.0:npm@10.0.0:npm@11.0.0:global"
+    echo "/n/lib/node_modules/ccusage:ccusage@2.0.0:ccusage@1.0.0:ccusage@2.0.0:global"
+    echo "/n/lib/node_modules/newnode:newnode@9.0.0:newnode@8.0.0:newnode@9.0.0:global"
+    exit 1 ;;
+  install)
+    case "$3" in newnode@latest) echo "npm ERR! code EBADENGINE"; exit 1 ;; esac ;;
+esac
+EOF
+  chmod +x "$root/bin/npm"
+}
+
+test_npm_updates_nvm_default_node_and_leaves_npm_to_nvm() {
+  nvm_setup
+  stub npm 'exit 0'
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+  assert_not_called 'nvm-npm install -g npm@latest'
+  assert_called 'nvm use --silent v20.0.0'
+  assert_called 'nvm install-latest-npm'
+  assert_contains "$(detail_of npm)" "updated 1; nvm default v20.0.0; held back for that Node: newnode; failed: none"
+  assert_called 'nvm-npm install -g ccusage@latest engine_strict=true'
+}
+
+test_npm_puts_back_an_npm_that_does_not_run_after_nvm_updates_it() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_NPM_BREAKS=1
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: npm(v20.0.0)"
+  local modules="$HOME/.nvm/versions/node/v20.0.0/lib/node_modules"
+  [ ! -e "$modules/npm/broken" ] || fail "the npm that does not run was left in place"
+  [ ! -e "$modules/.npm.mac-secure-previous" ] || fail "the kept copy was left behind"
+  [ ! -e "$modules/.npm.mac-secure-replaced" ] || fail "the replaced npm was left behind"
+}
+
+test_npm_puts_back_the_copy_a_stopped_run_left() {
+  nvm_setup
+  stub npm 'exit 0'
+  local modules="$HOME/.nvm/versions/node/v20.0.0/lib/node_modules"
+  cp -Rp "$modules/npm" "$modules/.npm.mac-secure-previous"
+  touch "$modules/.npm.mac-secure-previous/good" "$modules/npm/broken"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  [ -e "$modules/npm/good" ] || fail "the kept copy was not put back"
+  [ ! -e "$modules/npm/broken" ] || fail "the npm that does not run is still in place"
+}
+
+test_npm_reads_a_home_relative_nvm_dir_and_scans_it() {
+  nvm_setup "$HOME/.config/nvm"
+  stub npm 'exit 0'
+  mkdir -p "$HOME/.config/mac-secure"
+  echo 'NVM_DIR=~/.config/nvm' >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+  ( . "$REPO/lib/common.sh"; . "$REPO/lib/vulns.sh"; ms_vuln_targets ) | grep -qx "$HOME/.config/nvm/versions/node" ||
+    fail "the vulns scan does not cover the configured nvm folder"
+}
+
+test_npm_configured_nvm_dir_that_is_missing_defers() {
+  stub npm 'exit 0'
+  mkdir -p "$HOME/.config/mac-secure"
+  echo 'NVM_DIR=~/nowhere' >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "NVM_DIR $HOME/nowhere has no versions/node"
+}
+
+test_npm_engine_warning_on_another_failure_is_a_failure() {
+  stub npm 'case "$1" in
+    outdated) echo "/x/lib/node_modules/tool:tool@2.0.0:tool@1.0.0:tool@2.0.0:global"; exit 1 ;;
+    install) echo "npm warn EBADENGINE Unsupported engine"; echo "npm error code ECONNRESET"; exit 1 ;;
+  esac'
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: tool"
+}
+
+test_npm_offline_nvm_check_defers_without_touching_npm() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_OUTDATED_FAILS=1 NVM_NPM_FAILS=1
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_not_called 'nvm install-latest-npm'
+}
+
+test_npm_nvm_without_a_default_alias_is_named_and_clean() {
+  nvm_setup
+  stub npm 'exit 0'
+  rm "$HOME/.nvm/alias/default"
+  export NVM_DEFAULT=N/A
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "nvm has no default Node"
+}
+
+test_npm_nvm_default_that_does_not_resolve_is_deferred() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_DEFAULT=N/A
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "could not check: nvm default 20 does not resolve"
+}
+
+test_npm_finds_homebrew_nvm_and_a_configured_folder() {
+  nvm_setup "$HOME/nvm-data"
+  mkdir -p "$TMP/homebrew/opt/nvm" "$HOME/.config/mac-secure"
+  mv "$HOME/nvm-data/nvm.sh" "$TMP/homebrew/opt/nvm/nvm.sh"
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; esac"
+  rm "$STUBS/npm"
+  echo "NVM_DIR=$HOME/nvm-data" >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+}
+
+test_npm_runs_for_nvm_without_npm_on_path() {
+  nvm_setup
+  rm "$STUBS/npm"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+}
+
+test_npm_failed_nvm_npm_update_fails_the_module() {
+  nvm_setup
+  export NVM_NPM_FAILS=1
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: npm(v20.0.0)"
+}
+
+test_npm_failed_nvm_check_is_deferred_and_named() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_OUTDATED_FAILS=1
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "could not check: nvm v20.0.0"
+}
+
+test_npm_covers_nvm_default_once_when_it_is_first_on_path() {
+  nvm_setup
+  rm "$STUBS/npm"
+  # As EXTRA_PATH would put it, ahead of the standard directories.
+  export MS_JOB_PATH="$HOME/.nvm/versions/node/v20.0.0/bin:$MS_JOB_PATH"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_not_called 'nvm-npm install -g npm@latest'
+  assert_eq 1 "$(grep -c 'nvm-npm install -g ccusage@latest' "$CALLS")" "ccusage installs"
+}
+
+test_sandbox_hides_the_real_nvm() {
+  [ -z "${NVM_DIR:-}" ] || fail "NVM_DIR is set in the sandbox: $NVM_DIR"
+}
+
+test_npm_is_not_in_use_without_npm_or_nvm() {
+  rm "$STUBS/npm"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_eq "not in use" "$(detail_of npm)"
+}
+
 test_npm_nothing_outdated_is_ok() {
   stub npm 'exit 0'
   run_daily npm
@@ -955,10 +1158,12 @@ test_vulns_missing_configured_location_keeps_its_results() {
   run_daily vulns
   assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
   rm -r "$TMP/volume"
+  rm "$VULN_DIR/scanned-at"
   run_daily vulns
-  assert_eq deferred "$(result_of vulns)"
-  assert_contains "$(detail_of vulns)" "failed: $TMP/volume/tools"
+  assert_eq ok "$(result_of vulns)"
+  [ -s "$VULN_DIR/scanned-at" ] || fail "a missing configured location held back the stamp"
   assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
+  assert_contains "$(audit_vulns_only)" "$(printf 'low\tvuln-coverage-gap\t%s, from VULN_SCAN_PATHS, was not there to scan' "$TMP/volume/tools")"
 }
 
 test_vulns_output_drops_control_characters() {
@@ -1406,6 +1611,8 @@ test_root_job_records_results_for_status() {
   assert_contains "$results" "app-store	ok"
   assert_contains "$results" "vendor-installers	ok"
   assert_contains "$results" "macos	ok"
+  # status reads this as the user, and the job's umask would leave a new file root-only.
+  assert_eq "-rw-r--r--" "$(ls -l "$RESULTS" | cut -c1-10)" "results mode"
 }
 
 test_root_job_records_a_failed_vendor_and_a_failed_update() {

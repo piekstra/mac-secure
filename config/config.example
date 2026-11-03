@@ -21,6 +21,10 @@
 # Directories to search for tools before the standard ones, separated by colons.
 #EXTRA_PATH=
 
+# nvm's folder, when it is not ~/.nvm. The daily job does not read your shell profile. Write the
+# path, or start it with ~/; other shell syntax is not expanded.
+#NVM_DIR=~/.config/nvm
+
 # Run on each binary cargo-local builds, before it replaces the installed one.
 #CARGO_LOCAL_SIGN_COMMAND=
 
@@ -34,6 +38,6 @@
 # More directories for the vulns module to scan, separated by colons. ~/ is your home folder.
 #VULN_SCAN_PATHS=~/src
 
-# no leaves Homebrew formulae out of the vulns module. brew vulns sends each formula's package name
-# and version to OSV.dev; grype matches everything else on this Mac.
+# no leaves Homebrew formulae out of the vulns module. brew vulns sends each formula's source
+# repository URL and version tag to OSV.dev; grype matches everything else on this Mac.
 #VULN_HOMEBREW=yes
