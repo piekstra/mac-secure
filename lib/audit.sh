@@ -188,6 +188,73 @@ EOF
   done <"$list"
 }
 
+# Prints "<browser>-<revision>|<path>" for each browser build an installed copy of Playwright needs.
+# Each file in .links holds the path of one copy, whose browsers.json lists the revisions it uses.
+playwright_build_users() {
+  local link path
+  for link in "$1/.links"/*; do
+    [ -f "$link" ] || continue
+    path=$(cat "$link")
+    [ -f "$path/browsers.json" ] || continue
+    awk -F'"' -v path="$path" '
+      /"name":/ { name = $4 }
+      /"revision":/ && (name == "chromium" || name == "firefox") { print name "-" $4 "|" path }
+    ' "$path/browsers.json"
+  done
+}
+
+# No package scanner identifies Playwright's own browser builds. One older than the installed
+# browser, or than the newest build Playwright has here, lacks the security fixes released since.
+# Playwright deletes a build once no installed copy needs it, so the finding names those copies.
+audit_playwright_browsers() {
+  local cache=${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright} dir build kind plist version builds="" users
+  local newest_chromium=0 newest_firefox=0 installed newest label reference used_by action
+  [ -d "$cache" ] || return 0
+  for dir in "$cache"/chromium-[0-9]* "$cache"/firefox-[0-9]*; do
+    [ -d "$dir" ] || continue
+    for plist in "$dir"/chrome-mac*/*.app/Contents/Info.plist "$dir"/firefox/*.app/Contents/Info.plist; do
+      [ -f "$plist" ] && break
+    done
+    [ -f "$plist" ] || continue
+    version=$(ms_plist_value "$plist" CFBundleShortVersionString) || continue
+    case "${version%%.*}" in ''|*[!0-9]*) continue ;; esac
+    build=$(basename "$dir")
+    kind=${build%-*}
+    builds="$builds$kind|$build|$version
+"
+    if [ "$kind" = chromium ] && [ "${version%%.*}" -gt "$newest_chromium" ]; then newest_chromium=${version%%.*}; fi
+    if [ "$kind" = firefox ] && [ "${version%%.*}" -gt "$newest_firefox" ]; then newest_firefox=${version%%.*}; fi
+  done
+  [ -n "$builds" ] || return 0
+  users=$(playwright_build_users "$cache")
+  while IFS='|' read -r kind build version; do
+    [ -n "$build" ] || continue
+    if [ "$kind" = chromium ]; then
+      label=Chromium newest=$newest_chromium
+      installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/Google Chrome.app/Contents/Info.plist" CFBundleShortVersionString) && reference="Google Chrome"
+    else
+      label=Firefox newest=$newest_firefox
+      installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/Firefox.app/Contents/Info.plist" CFBundleShortVersionString) && reference=Firefox
+    fi
+    case "${installed%%.*}" in
+      ''|*[!0-9]*) reference="the newest build Playwright has here," ;;
+      *) [ "${installed%%.*}" -le "$newest" ] || newest=${installed%%.*} ;;
+    esac
+    [ "${version%%.*}" -lt "$newest" ] || continue
+    used_by=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" -v home="$HOME" '
+      $1 == b { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
+      END { print out }')
+    if [ -n "$used_by" ]; then
+      action="Update or remove the Playwright copies that use it: $used_by. Playwright deletes a build once no copy needs it."
+    else
+      action="No installed copy of Playwright uses it. The next playwright install deletes it, or delete $cache/$build."
+    fi
+    finding medium stale-playwright-browser "Playwright's $label $version ($build) is older than $reference $newest, so it lacks the security fixes released since." "$action"
+  done <<EOF
+$builds
+EOF
+}
+
 audit_homebrew() {
   command -v brew >/dev/null 2>&1 || return 0
   local formulae casks
@@ -211,6 +278,7 @@ ms_audit_collect() {
   audit_apps
   audit_listeners
   audit_stale_browsers
+  audit_playwright_browsers
   audit_homebrew
 }
 

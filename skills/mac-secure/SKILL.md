@@ -18,7 +18,7 @@ mac-secure modules --json   # every module: scope, recommended, enabled, availab
 mac-secure logs daily -n 100   # also: enforcer, root
 ```
 
-Report findings with their `action`. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
+Report findings with their `action`. For `stale-playwright-browser`, the action names the Playwright copies that keep the old build. Some are cached libraries that a program downloads again when it runs, so ask before removing any. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
 
 ## Changing the Mac
 

@@ -287,6 +287,48 @@ test_audit_skips_loopback_listeners() {
   assert_not_contains "$out" 'localsix accepts'
 }
 
+# Usage: fake_bundle <path to .app> <version>
+fake_bundle() {
+  mkdir -p "$1/Contents"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>%s</string></dict></plist>\n' "$2" >"$1/Contents/Info.plist"
+}
+
+playwright_cache_setup() {
+  unset PLAYWRIGHT_BROWSERS_PATH
+  CACHE="$HOME/Library/Caches/ms-playwright"
+  fake_bundle "$CACHE/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app" 143.0.7499.4
+  fake_bundle "$CACHE/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app" 156.0.8078.4
+  fake_bundle "$CACHE/firefox-1509/firefox/Nightly.app" 146.0.1
+  fake_bundle "$CACHE/firefox-1555/firefox/Nightly.app" 152.0
+  mkdir -p "$CACHE/.links" "$HOME/old copy/playwright-core"
+  cp "$FIXTURES/playwright-browsers.json" "$HOME/old copy/playwright-core/browsers.json"
+  echo "$HOME/old copy/playwright-core" >"$CACHE/.links/aaa"
+  echo "$TMP/deleted/playwright-core" >"$CACHE/.links/bbb"
+}
+
+test_audit_finds_playwright_builds_older_than_the_installed_browser() {
+  audit_setup
+  playwright_cache_setup
+  fake_bundle "$MS_APPLICATIONS_DIR/Google Chrome.app" 156.0.8078.80
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than Google Chrome 156"
+  assert_contains "$out" "Update or remove the Playwright copies that use it: ~/old copy/playwright-core."
+  assert_not_contains "$out" "(chromium-1248)"
+  assert_contains "$out" "Playwright's Firefox 146.0.1 (firefox-1509) is older than the newest build Playwright has here, 152"
+  assert_not_contains "$out" "(firefox-1555)"
+}
+
+test_audit_names_no_copy_for_an_unused_playwright_build() {
+  audit_setup
+  playwright_cache_setup
+  rm "$CACHE/.links/aaa"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than the newest build Playwright has here, 156"
+  assert_contains "$out" "No installed copy of Playwright uses it. The next playwright install deletes it"
+}
+
 test_audit_changes_nothing() {
   audit_setup
   audit_findings >/dev/null

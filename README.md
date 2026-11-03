@@ -59,6 +59,8 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `firewall` | root | yes | Keeps the macOS firewall on | An unsigned program that listens beyond this Mac raises an allow dialog |
 | `vendor-installers` | root | no | Keeps the pkg-based apps in `vendor-installers.txt` current | An app can close when its installer runs |
 
+`audit` also reports a Playwright browser build older than the browser installed on the Mac, or than the newest build Playwright has there, with the copies of Playwright that keep it. Playwright [deletes a build](https://playwright.dev/docs/browsers#stale-browser-removal) once no installed copy needs it.
+
 A module whose tool is not installed is skipped until the tool appears, so enabling one you do not use costs nothing.
 
 ## What runs
