@@ -846,7 +846,8 @@ eol_runtimes() {
     name=${dir##*/cpython-}
     version=${name%%-*}
     eol_plain_version "$version" || continue
-    echo "python|${version%.*}|Python managed by uv|$version|$dir|Check that no project's virtual environment uses it.|uv python uninstall $version"
+    name=$(eol_numeric "$version")
+    echo "python|${name%.*}|Python managed by uv|$version|$dir|Check that no project's virtual environment uses it.|uv python uninstall $version"
   done
   for dir in "${MS_DOTNET_ROOT:-/usr/local/share/dotnet}/sdk"/[0-9]*; do
     [ -d "$dir" ] || continue
@@ -854,15 +855,22 @@ eol_runtimes() {
     eol_plain_version "$version" || continue
     # endoflife.date names .NET 5 and later by major version, and earlier ones as major.minor.
     case "$version" in
-      [0-4].*) name=$(echo "$version" | cut -d. -f1,2) ;;
-      *) name=${version%%.*} ;;
+      [0-4].*) name=$(eol_numeric "$version" | cut -d. -f1,2) ;;
+      *) name=$(eol_numeric "$version" | cut -d. -f1) ;;
     esac
     echo "dotnet|$name|.NET SDK|$version|$dir|Check that no project's global.json needs it.|sudo rm -rf '$dir'"
   done
 }
 
+# A version, optionally with a prerelease or build suffix such as 7.0.100-rc.2 or 3.13.1+freethreaded:
+# nothing that can end a quoted word or start another command.
 eol_plain_version() {
-  printf '%s' "$1" | grep -Eqx '[0-9]+(\.[0-9]+)*'
+  printf '%s' "$1" | grep -Eqx '[0-9]+(\.[0-9]+)*[0-9A-Za-z.+-]*'
+}
+
+# The numeric part of a version, from which its release cycle is taken.
+eol_numeric() {
+  printf '%s' "$1" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/'
 }
 
 # Prints Homebrew's own word on what it no longer supports, as audit findings: a disabled package
@@ -917,7 +925,8 @@ ch_eol() {
     elif [ -f "$MS_EOL_DIR/$product.json" ] && [ -z "$(find "$MS_EOL_DIR/$product.json" -mtime +"$MS_EOL_LIST_DAYS")" ]; then
       stale="$stale $product"
     else
-      rm -f "$MS_EOL_DIR/$product.json"
+      # An old list still holds dates already past, so it stays in use; the check is reported
+      # incomplete until a list can be fetched again.
       missing="$missing $product"
     fi
   done
