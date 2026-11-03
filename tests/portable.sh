@@ -587,7 +587,10 @@ vulns_results() {
   echo $(($(date +%s) - days * 86400)) >"$HOME/Library/Application Support/mac-secure/vulns/scanned-at"
 }
 
+# With the module on and its tools present, unless a test changes either first.
 audit_vulns_only() {
+  PATH="$STUBS:$PATH"
+  [ -n "${VULNS_OFF:-}" ] || { mkdir -p "$HOME/.config/mac-secure"; grep -qx vulns "$HOME/.config/mac-secure/enabled" 2>/dev/null || echo vulns >>"$HOME/.config/mac-secure/enabled"; }
   . "$REPO/lib/common.sh"
   . "$REPO/lib/modules.sh"
   . "$REPO/lib/vulns.sh"
@@ -800,10 +803,8 @@ test_audit_vulns_groups_by_location_and_raises_known_exploited() {
 
 test_audit_vulns_reports_a_scan_that_is_off_missing_or_stale() {
   local NVM="$HOME/.nvm/versions/node"
-  assert_contains "$(audit_vulns_only)" "$(printf 'low\tvuln-scan-off')"
-  mkdir -p "$HOME/.config/mac-secure"
-  echo vulns >"$HOME/.config/mac-secure/enabled"
-  assert_contains "$(audit_vulns_only)" "$(printf 'medium\tvuln-scan-missing')"
+  assert_contains "$(VULNS_OFF=1 audit_vulns_only)" "$(printf 'low\tvuln-scan-off')"
+  assert_contains "$(audit_vulns_only)" "$(printf 'medium\tvuln-scan-missing\tThe vulns module is on, but no scan has finished.')"
   vulns_results 9 "$NVM|Low|CVE-2099-0003|-|-|fixed|1.0.1|npm|a|1.0.0|$NVM/v18.0.0/lib/node_modules/a/package.json"
   assert_contains "$(audit_vulns_only)" "$(printf 'medium\tvuln-scan-stale\tThe last complete vulnerability scan is 9 days old')"
   rm "$HOME/Library/Application Support/mac-secure/vulns/scanned-at"
@@ -827,6 +828,94 @@ test_vulns_ignore_file_hides_reviewed_matches() {
   assert_not_contains "$out" "CVE-2099-0004"
 }
 
+test_audit_reports_nothing_from_old_results_once_vulns_is_off() {
+  local NVM="$HOME/.nvm/versions/node" out
+  vulns_results 0 "$NVM|Critical|CVE-2099-0001|kev|-|fixed|18.99.0|binary|node|18.0.0|$NVM/v18.0.0/bin/node"
+  out=$(VULNS_OFF=1 audit_vulns_only)
+  assert_contains "$out" "$(printf 'low\tvuln-scan-off')"
+  assert_not_contains "$out" "vulnerable-software"
+  assert_contains "$(mac_secure vulns)" "The vulns module is off, so these results are not being updated."
+}
+
+test_audit_reports_coverage_gaps() {
+  vulns_setup
+  run_daily vulns
+  local out
+  out=$(audit_vulns_only)
+  assert_contains "$out" "$(printf 'low\tvuln-coverage-gap\tbrew vulns could not check other-tap-formula (untrusted_tap).')"
+  assert_contains "$out" "1 Homebrew formulae have no source URL brew vulns supports"
+}
+
+test_vulns_names_formulae_checked_at_the_wrong_version() {
+  vulns_setup
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); d["outdated_without_sbom"]=["oldfx"]; json.dump(d, open(sys.argv[2],"w"))' \
+    "$FIXTURES/brew-vulns.json" "$TMP/brew-stale.json"
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) [ \"\$2\" = --help ] && exit 0; cat '$TMP/brew-stale.json'; exit 1 ;; esac"
+  run_daily vulns
+  assert_contains "$(cat "$VULN_DIR/gaps.tsv")" "$(printf 'brew vulns checked the current formula, not the installed version, of oldfx')"
+  assert_contains "$(cat "$VULN_DIR/gaps.tsv")" "$(printf '\tbrew upgrade oldfx')"
+}
+
+test_vulns_other_brew_errors_keep_homebrew_results() {
+  vulns_setup
+  run_daily vulns
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) echo 'Error: Failed to install Homebrew Portable Ruby' >&2; exit 1 ;; esac"
+  run_daily vulns
+  assert_eq deferred "$(result_of vulns)"
+  assert_contains "$(detail_of vulns)" "failed: homebrew"
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "CVE-2099-0101"
+}
+
+test_vulns_homebrew_can_be_left_out() {
+  vulns_setup
+  mkdir -p "$HOME/.config/mac-secure"
+  echo VULN_HOMEBREW=no >"$HOME/.config/mac-secure/config"
+  run_daily vulns
+  assert_eq ok "$(result_of vulns)"
+  assert_not_called 'brew vulns'
+  assert_not_contains "$(cat "$VULN_DIR/latest.tsv")" "homebrew"
+}
+
+test_vulns_failed_database_update_is_not_a_complete_scan() {
+  vulns_setup
+  stub grype "case \"\$1 \$2\" in 'db update') exit 1 ;; esac; case \"\$1\" in sbom:*) cat '$FIXTURES/grype-matches.txt' ;; esac"
+  run_daily vulns
+  assert_eq deferred "$(result_of vulns)"
+  assert_contains "$(detail_of vulns)" "failed: database-update"
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "CVE-2099-0001"
+  [ ! -f "$VULN_DIR/scanned-at" ] || fail "a scan with an old database was stamped complete"
+}
+
+test_vulns_missing_configured_location_keeps_its_results() {
+  vulns_setup
+  mkdir -p "$HOME/.config/mac-secure" "$TMP/volume/tools"
+  echo "VULN_SCAN_PATHS=$TMP/volume/tools" >"$HOME/.config/mac-secure/config"
+  run_daily vulns
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
+  rm -r "$TMP/volume"
+  run_daily vulns
+  assert_eq deferred "$(result_of vulns)"
+  assert_contains "$(detail_of vulns)" "failed: $TMP/volume/tools"
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$TMP/volume/tools/v18.0.0/bin/node"
+}
+
+test_vulns_output_drops_control_characters() {
+  local NVM="$HOME/.nvm/versions/node" out
+  mkdir -p "$HOME/.config/mac-secure"
+  echo vulns >"$HOME/.config/mac-secure/enabled"
+  vulns_results 0 "$NVM|High|CVE-2099-0004|-|-|fixed|2.0.0|npm|$(printf 'b\033[2Jad')|1.0.0|$NVM/x/node_modules/b/package.json"
+  out=$(mac_secure vulns)
+  assert_contains "$out" "b[2Jad 1.0.0"
+  assert_not_contains "$out" "$(printf '\033')"
+  assert_not_contains "$(audit_vulns_only)" "$(printf '\033')"
+}
+
+test_vulns_takes_one_filter() {
+  vulns_results 0 "$HOME/x|High|CVE-2099-0004|-|-|fixed|2.0.0|npm|b|1.0.0|$HOME/x/node_modules/b/package.json"
+  mac_secure vulns nvm express >/dev/null 2>&1
+  assert_eq 2 $? "exit status with two filters"
+}
+
 test_vulns_command_refuses_without_results_and_prints_valid_json() {
   local NVM="$HOME/.nvm/versions/node"
   mac_secure vulns >/dev/null 2>&1
@@ -839,6 +928,10 @@ test_vulns_command_refuses_without_results_and_prints_valid_json() {
   out=$(mac_secure vulns --json)
   assert_json "$out"
   assert_contains "$out" '"known_exploited":true'
+  assert_contains "$out" '"severity":"critical"'
+  assert_contains "$out" '"fixed_in":null'
+  assert_contains "$out" '"module_enabled":false'
+  assert_contains "$out" "$(printf '"last_complete_scan":"%s' "$(date -u '+%Y-%m-%dT')")"
   assert_contains "$out" 'Old \"quoted\".app'
   assert_not_contains "$out" 'CVE-2099-0201'
   assert_contains "$(mac_secure vulns --all --json)" 'CVE-2099-0201'

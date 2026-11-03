@@ -533,16 +533,29 @@ for found in findings:
                                 "fixed" if fixed else "not-fixed", ",".join(fixed), "brew", found["formula"],
                                 str(found.get("version", "")), path]))
 checked = report.get("checked", 0)
+skipped = report.get("skipped_formulae") or []
 unscanned = report.get("unscanned_formulae") or {}
+stale = report.get("outdated_without_sbom") or []
 with open(sys.argv[3], "w") as out:
-    out.write("homebrew: %s formulae checked, %d skipped for lack of a supported source URL"
-              % (len(checked) if isinstance(checked, list) else checked, len(report.get("skipped_formulae", []))))
-    if unscanned:
-        out.write(", not checked: %s" % ", ".join("%s (%s)" % item for item in sorted(unscanned.items())[:3]))
-    out.write("\n")
+    out.write("homebrew: %s formulae checked, %d skipped for lack of a supported source URL, %d not checked, %d checked at the current formula version\n"
+              % (len(checked) if isinstance(checked, list) else checked, len(skipped), len(unscanned), len(stale)))
+# Gaps that persist from run to run are reported by audit rather than retried, so they do not keep
+# the scan from ever completing.
+gaps = []
+if stale:
+    gaps.append(("brew vulns checked the current formula, not the installed version, of %s: they are out of date and have no install-time record."
+                 % ", ".join(stale), "brew upgrade %s" % " ".join(stale)))
+if unscanned:
+    gaps.append(("brew vulns could not check %s." % ", ".join("%s (%s)" % item for item in sorted(unscanned.items())),
+                 "For an untrusted tap, brew trust it if you trust it. Otherwise: brew doctor"))
+if skipped:
+    gaps.append(("%d Homebrew formulae have no source URL brew vulns supports, so they were not checked." % len(skipped),
+                 "Nothing to do here. brew-formulae still keeps them updated."))
+with open(sys.argv[5], "w") as out:
+    out.write("".join("%s\t%s\n" % gap for gap in gaps))
 with open(sys.argv[4], "w") as out:
     out.write("\n".join(lines) + ("\n" if lines else ""))
-' "$work/brew.json" "$prefix" "$work/coverage.txt" "$work/brew.tsv"; then
+' "$work/brew.json" "$prefix" "$work/coverage.txt" "$work/brew.tsv" "$work/gaps.tsv"; then
     cat "$work/brew.err" >&2
     return 1
   fi
@@ -551,7 +564,7 @@ with open(sys.argv[4], "w") as out:
 
 ch_vulns() {
   ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
-  local target scanned=0 failed="" before after new counts coverage
+  local target scanned=0 failed="" before after new counts coverage extra help
   export GRYPE_CHECK_FOR_APP_UPDATE=false SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_DB_AUTO_UPDATE=false
   # Not local: the trap runs when the module's subshell exits. bash skips an EXIT trap when a signal
   # kills it, so the time limit's TERM is turned into an exit.
@@ -560,15 +573,23 @@ ch_vulns() {
   trap 'exit 143' TERM
   local work=$VULN_WORK
   printf '{}\n' >"$work/empty.yaml"
-  # On a failed update grype keeps the database it has, and refuses to scan once that is too old.
-  grype db update -c "$work/empty.yaml" || echo "grype db update failed; scanning with the database already here"
+  # On a failed update grype keeps the database it has, and refuses to scan once that is too old. The
+  # scan goes on, but is not stamped complete, so audit reports advisories going unmatched.
+  grype db update -c "$work/empty.yaml" || failed=" database-update"
   mkdir -p "$MS_VULN_DIR"
   vuln_template >"$work/vulns.tmpl"
   : >"$work/latest.tsv"
   : >"$work/coverage.txt"
+  : >"$work/gaps.tsv"
+  extra=$(ms_vuln_extra_targets)
   # A location that could not be scanned keeps its previous results, so a failed scan never reads as clean.
   while IFS= read -r target; do
-    [ -d "$target" ] || continue
+    if [ ! -d "$target" ]; then
+      printf '%s\n' "$extra" | grep -qxF "$target" || continue
+      failed="$failed $target"
+      awk -F'\t' -v t="$target" '$1 == t && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+      continue
+    fi
     if scan_vuln_target "$target" "$work" >>"$work/latest.tsv"; then
       scanned=$((scanned + 1))
     else
@@ -578,20 +599,25 @@ ch_vulns() {
   done <<EOF
 $(ms_vuln_targets)
 EOF
-  # A Homebrew without the command cannot check formulae; that is a gap to report, not a failure to retry.
-  if command -v brew >/dev/null 2>&1 && ! brew vulns --help >/dev/null 2>&1; then
-    echo "homebrew: this Homebrew has no brew vulns, so formulae were not checked" >"$work/coverage.txt"
-  elif command -v brew >/dev/null 2>&1; then
-    if scan_vuln_homebrew "$work" >>"$work/latest.tsv"; then
+  # A Homebrew without the command cannot check formulae, a gap to report rather than a failure to
+  # retry. Only brew's own "Unknown command" says so: any other error, such as an offline Homebrew
+  # that cannot set up its Ruby, is a check that could not run.
+  if command -v brew >/dev/null 2>&1 && [ "$(ms_config_get VULN_HOMEBREW yes)" != no ]; then
+    if ! help=$(brew vulns --help 2>&1 >/dev/null) && printf '%s' "$help" | grep -q 'Unknown command'; then
+      echo "homebrew: this Homebrew has no brew vulns" >"$work/coverage.txt"
+      printf '%s\t%s\n' "This Homebrew has no brew vulns, so formulae were not checked." "brew update" >"$work/gaps.tsv"
+    elif scan_vuln_homebrew "$work" >>"$work/latest.tsv"; then
       scanned=$((scanned + 1))
     else
       failed="$failed homebrew"
       awk -F'\t' '$1 == "homebrew" && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+      cp "$MS_VULN_GAPS" "$work/gaps.tsv" 2>/dev/null
     fi
   fi
   before=$(ms_vuln_urgent_keys)
   mv -f "$work/latest.tsv" "$MS_VULN_RESULTS"
   mv -f "$work/coverage.txt" "$MS_VULN_COVERAGE"
+  mv -f "$work/gaps.tsv" "$MS_VULN_GAPS"
   # The stamp marks the last complete scan, so repeated partial failures surface as a stale scan.
   [ -n "$failed" ] || date +%s >"$MS_VULN_STAMP"
   after=$(ms_vuln_urgent_keys)

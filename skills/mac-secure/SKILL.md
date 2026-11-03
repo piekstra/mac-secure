@@ -23,7 +23,7 @@ Report findings with their `action`. A finding is a lead, not a verdict: `system
 
 ## Vulnerability findings
 
-`audit` gives one `vulnerable-software` finding per location and one `malware-package` finding per malware match. `mac-secure vulns <location or package> --json` lists the matches behind a finding, each with `fixed_in`, `known_exploited` and `path`.
+`audit` gives one `vulnerable-software` finding per location, one `malware-package` finding per malware match, one `lower-vulnerabilities` count, and a `vuln-coverage-gap` for each kind of thing the scan could not check. `mac-secure vulns <location or package> --json` lists the matches behind a finding, each with `fixed_in`, `known_exploited` and `path`.
 
 - Lead with `malware-package`, then matches with `known_exploited: true`.
 - A malware match is a lead until checked: confirm the package at `path` has that name and version and came from the registry the advisory names. Do not run it. If it holds, tell the user to remove it and to change the credentials their account can read; removing it follows "Look before deleting".

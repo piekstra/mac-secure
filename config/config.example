@@ -30,3 +30,7 @@
 
 # More directories for the vulns module to scan, separated by colons. ~/ is your home folder.
 #VULN_SCAN_PATHS=~/src
+
+# no leaves Homebrew formulae out of the vulns module. brew vulns sends each formula's package name
+# and version to OSV.dev; grype matches everything else on this Mac.
+#VULN_HOMEBREW=yes

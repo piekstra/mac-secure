@@ -11,6 +11,7 @@ MS_VULN_DIR="$MS_STATE_DIR/vulns"
 MS_VULN_RESULTS="$MS_VULN_DIR/latest.tsv"
 MS_VULN_STAMP="$MS_VULN_DIR/scanned-at"
 MS_VULN_COVERAGE="$MS_VULN_DIR/coverage.txt"
+MS_VULN_GAPS="$MS_VULN_DIR/gaps.tsv"
 MS_VULN_IGNORE="$MS_CONFIG_DIR/vulns-ignore.txt"
 MS_VULN_STALE_DAYS=3
 
@@ -18,11 +19,24 @@ MS_VULN_STALE_DAYS=3
 # in each, not what a lockfile there declares, so a cloned repository's dependencies do not count.
 # Each location appears once, without a trailing slash, since results are keyed by location.
 ms_vuln_targets() {
-  ms_vuln_target_lines | sed 's|//*$||' | awk 'NF && !seen[$0]++'
+  { ms_vuln_default_targets; ms_vuln_extra_targets; } | sed 's|//*$||' | awk 'NF && !seen[$0]++'
 }
 
-ms_vuln_target_lines() {
-  local prefix extra path
+# The locations VULN_SCAN_PATHS adds. One that is missing at scan time, such as a volume that is not
+# mounted, keeps its results, where a missing default location means the tool was removed.
+ms_vuln_extra_targets() {
+  local path
+  printf '%s\n' "$(ms_config_get VULN_SCAN_PATHS)" | tr ':' '\n' | while IFS= read -r path; do
+    case "$path" in
+      '') ;;
+      "~"/*) echo "$HOME/${path#\~/}" ;;
+      *) echo "$path" ;;
+    esac
+  done | sed 's|//*$||' | awk 'NF && !seen[$0]++'
+}
+
+ms_vuln_default_targets() {
+  local prefix
   cat <<EOF
 $HOME/.nvm/versions/node
 $HOME/.volta/tools
@@ -43,23 +57,17 @@ EOF
     prefix=$(brew --prefix 2>/dev/null)
     [ -z "$prefix" ] || echo "$prefix/lib"
   fi
-  extra=$(ms_config_get VULN_SCAN_PATHS)
-  printf '%s\n' "$extra" | tr ':' '\n' | while IFS= read -r path; do
-    case "$path" in
-      '') ;;
-      "~"/*) echo "$HOME/${path#\~/}" ;;
-      *) echo "$path" ;;
-    esac
-  done
 }
 
 # The well-formed results without the matches listed in vulns-ignore.txt, as `<id>` or
-# `<id>|<path part>|<why>`. Every reader goes through here, so a malformed row cannot shift columns.
+# `<id>|<path part>|<why>`. Every reader goes through here, so a malformed row cannot shift columns,
+# and control characters are dropped: names and paths come from whatever was installed, and an
+# escape sequence in one could rewrite what a terminal shows.
 ms_vulns_effective() {
   local ignore=/dev/null
   [ -f "$MS_VULN_RESULTS" ] || return 1
   [ ! -f "$MS_VULN_IGNORE" ] || ignore=$MS_VULN_IGNORE
-  awk -F'\t' -v home="$HOME" '
+  awk -F'\t' -v OFS='\t' -v home="$HOME" '
     FILENAME == ARGV[1] {
       if ($0 ~ /^[[:space:]]*(#|$)/) next
       n++
@@ -71,6 +79,7 @@ ms_vulns_effective() {
     }
     NF != 11 { next }
     {
+      for (f = 1; f <= NF; f++) gsub(/[[:cntrl:]]/, "", $f)
       for (i = 1; i <= n; i++) if ($3 == ids[i] && (parts[i] == "" || index($11, parts[i]))) next
       print
     }

@@ -199,17 +199,26 @@ audit_homebrew() {
 }
 
 # One finding per scanned location with critical or high matches, and one per malware match.
+# With the module off, earlier results are not reported: nothing refreshes them, so they would read
+# as current.
 audit_vulns() {
-  local age
-  if [ ! -f "$MS_VULN_RESULTS" ]; then
-    if ms_user_enabled vulns && ! ms_module_available vulns; then
-      finding medium vuln-scan-missing "The vulns module is on, but $(ms_module_missing_tool vulns) is not installed, so nothing is scanned." "brew install grype syft"
-    elif ms_user_enabled vulns; then
-      finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
-    else
-      finding low vuln-scan-off "Installed tools, packages and apps are not checked for known vulnerabilities." "brew install grype syft; mac-secure enable vulns"
-    fi
+  local age what action
+  if ! ms_user_enabled vulns; then
+    finding low vuln-scan-off "Installed tools, packages and apps are not checked for known vulnerabilities." "brew install grype syft; mac-secure enable vulns"
     return 0
+  fi
+  if ! ms_module_available vulns; then
+    finding medium vuln-scan-missing "The vulns module is on, but $(ms_module_missing_tool vulns) is not installed, so nothing is scanned." "brew install grype syft"
+    return 0
+  fi
+  if [ ! -f "$MS_VULN_RESULTS" ]; then
+    finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
+    return 0
+  fi
+  if [ -f "$MS_VULN_GAPS" ]; then
+    while IFS=$'\t' read -r what action; do
+      [ -z "$what" ] || finding low vuln-coverage-gap "$what" "$action"
+    done <"$MS_VULN_GAPS"
   fi
   if ! age=$(ms_vuln_scan_age_days); then
     finding medium vuln-scan-stale "No vulnerability scan has finished every location, so some may not have been checked." "mac-secure logs daily, or: mac-secure run vulns"

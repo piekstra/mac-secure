@@ -370,30 +370,34 @@ cmd_vulns() {
       --all) all=all ;;
       --json) json=1 ;;
       -*) ms_die "unknown option: $arg" ;;
-      *) filter=$arg ;;
+      *)
+        [ -z "$filter" ] || ms_die "give one filter: a location, path or package"
+        filter=$arg
+        ;;
     esac
   done
   case "$filter" in "~"/*) filter="$HOME/${filter#\~/}" ;; esac
   # No results must not read as no vulnerabilities.
   [ -f "$MS_VULN_RESULTS" ] || ms_die "no scan results yet. Run: mac-secure run vulns"
   scanned=$(cat "$MS_VULN_STAMP" 2>/dev/null)
-  case "$scanned" in
-    ''|*[!0-9]*) scanned="" ;;
-    *) scanned=$(date -r "$scanned" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$scanned" '+%Y-%m-%d %H:%M') ;;
-  esac
+  case "$scanned" in ''|*[!0-9]*) scanned="" ;; esac
   if [ "$json" -eq 1 ]; then
-    printf '{"last_complete_scan":%s,"matches":[' "$(ms_json_string "$scanned")"
+    # Machine output matches audit --json: lowercase severities, and null for what is not known.
+    printf '{"module_enabled":%s,"last_complete_scan":%s,"matches":[' "$(ms_user_enabled vulns && echo true || echo false)" \
+      "$([ -n "$scanned" ] && ms_json_string "$(date -u -r "$scanned" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$scanned" '+%Y-%m-%dT%H:%M:%SZ')" || echo null)"
     ms_vulns_list "$all" "$filter" | awk -F'\t' '
-      function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/[[:cntrl:]]/, "", s); return "\"" s "\"" }
+      function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
       {
         printf "%s{\"severity\":%s,\"id\":%s,\"known_exploited\":%s,\"malware\":%s,\"fix_state\":%s,\"fixed_in\":%s,\"type\":%s,\"package\":%s,\"version\":%s,\"path\":%s,\"location\":%s}",
-          (NR > 1 ? "," : ""), q($2), q($3), ($4 == "kev" ? "true" : "false"), ($5 == "malware" ? "true" : "false"),
-          q($6), q($7), q($8), q($9), q($10), q($11), q($1)
+          (NR > 1 ? "," : ""), q(tolower($2)), q($3), ($4 == "kev" ? "true" : "false"), ($5 == "malware" ? "true" : "false"),
+          q($6), ($7 == "" ? "null" : q($7)), q($8), q($9), q($10), q($11), q($1)
       }
     '
     printf ']}\n'
     return
   fi
+  ms_user_enabled vulns || printf 'The vulns module is off, so these results are not being updated.\n'
+  [ -z "$scanned" ] || scanned=$(date -r "$scanned" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$scanned" '+%Y-%m-%d %H:%M')
   printf 'Last complete scan: %s\n\n' "${scanned:-none; see mac-secure logs daily}"
   ms_vulns_list "$all" "$filter" | awk -F'\t' -v home="$HOME" '
     function show(p) { return index(p, home "/") == 1 ? "~" substr(p, length(home) + 1) : p }
