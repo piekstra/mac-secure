@@ -25,6 +25,7 @@ mac-secure enable --recommended
 | `status [--json]` | Security settings, jobs, each module's last result. Read-only. |
 | `audit [--json]` | Findings about this Mac, most severe first. Read-only. |
 | `modules [--json]` | Every module, what it does and what it can disrupt. Read-only. |
+| `notices [--json]` | What needs attention now: how many packages match a malware advisory, how many known-exploited vulnerabilities were first found in the last `NOTICE_DAYS` days (7 by default, set in `config`), failed runs of modules that are on, and a stale scan. Counts only, no package names. Prints nothing when nothing needs attention. Read-only and fast. |
 | `vulns [filter] [--all] [--json]` | Each known vulnerability from the last scan: critical, high and malware, or every severity with `--all`. The filter matches a location, path or package. Read-only. |
 | `logs [daily\|enforcer\|root] [-n <lines>]` | The newest log. Read-only. |
 | `enable <module>... \| --recommended [--yes]` | Turns modules on and installs their jobs. |
@@ -145,7 +146,9 @@ The repository ships a Claude Code plugin with a skill that teaches an agent how
 /plugin install mac-secure@mac-secure
 ```
 
-Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes to this repository.
+The plugin also has a hook that runs `mac-secure notices` when a Claude Code session starts, so the agent begins the session knowing about malware matches, newly found known-exploited vulnerabilities, failed update runs, or a stale scan. It prints nothing when nothing needs attention or `mac-secure` is not installed. Those lines become part of the session, so they go to the agent's model provider: counts, the scanned locations they are in, and the names of failed modules, never package names or paths. `SESSION_NOTICES=no` in `config` turns the hook off and leaves the skill.
+
+Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes to this repository. A script or another agent's start-up step can run `mac-secure notices` the same way.
 
 ## Develop
 

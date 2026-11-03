@@ -907,12 +907,15 @@ test_vulns_malformed_rows_are_never_read() {
 
 test_vulns_command_changes_nothing() {
   mac_secure vulns >/dev/null 2>&1
+  mac_secure notices >/dev/null 2>&1
   vulns_results 0 "$HOME/x|High|CVE-2099-0004|-|-|fixed|2.0.0|npm|b|1.0.0|$HOME/x/node_modules/b/package.json"
   local before
   before=$(find "$HOME" | sort)
   mac_secure vulns >/dev/null
   mac_secure vulns --json >/dev/null
   mac_secure vulns --all b >/dev/null
+  mac_secure notices >/dev/null
+  mac_secure notices --json >/dev/null
   assert_eq "$before" "$(find "$HOME" | sort)" "files under HOME"
   assert_not_called "sudo"
   assert_not_called "grype"
@@ -984,6 +987,101 @@ test_vulns_timeout_leaves_no_work_directory() {
   run_daily vulns
   assert_eq failed "$(result_of vulns)"
   assert_eq "" "$(find "$TMPDIR" -name 'mac-secure-vulns.*')" "work directories left"
+}
+
+test_notices_prints_nothing_when_nothing_needs_attention() {
+  assert_eq "" "$(mac_secure notices)"
+  assert_eq "[]" "$(mac_secure notices --json)"
+}
+
+test_notices_report_malware_new_known_exploited_failures_and_a_stale_scan() {
+  local NVM="$HOME/.nvm/versions/node" old new now
+  vulns_results 9 \
+    "$NVM|Critical|CVE-2099-0001|kev|-|fixed|18.99.0|binary|node|18.0.0|$NVM/v18.0.0/bin/node" \
+    "$NVM|High|CVE-2099-0005|kev|-|fixed|1.0.1|npm|old-one|1.0.0|$NVM/v18.0.0/lib/node_modules/old-one/package.json" \
+    "$NVM|Critical|GHSA-mmmm-0000-0003|-|malware|not-fixed||npm|evil-dep|1.0.1|$NVM/v18.0.0/lib/node_modules/evil-dep/package.json"
+  now=$(date +%s)
+  printf '%s|CVE-2099-0001|node|18.0.0|kev|-\t%s\n%s|CVE-2099-0005|old-one|1.0.0|kev|-\t%s\n' "$NVM" "$now" "$NVM" $((now - 30 * 86400)) \
+    >"$HOME/Library/Application Support/mac-secure/vulns/first-seen.tsv"
+  printf '2026-11-03 04:15\tbrew-casks\tfailed\t10\tx\n2026-11-03 04:15\trust\tok\t5\t\n2026-11-03 04:15\tuv\tfailed\t5\t\n' \
+    >"$HOME/Library/Application Support/mac-secure/last-run.tsv"
+  mkdir -p "$HOME/.config/mac-secure"
+  printf 'vulns\nbrew-casks\n' >"$HOME/.config/mac-secure/enabled"
+  local out
+  out=$(mac_secure notices)
+  assert_contains "$out" "mac-secure: 1 package matches a malware advisory. Next: mac-secure vulns --json lists them"
+  assert_not_contains "$out" "evil-dep"
+  assert_contains "$out" "mac-secure: 1 known-exploited vulnerability first found in the last 7 days, in ~/.nvm/versions/node. Next:"
+  assert_contains "$out" "mac-secure: The last update run failed for: brew-casks. Next: mac-secure logs"
+  assert_not_contains "$out" "uv"
+  assert_contains "$out" "mac-secure: The last complete vulnerability scan is 9 days old."
+  assert_eq 4 "$(printf '%s\n' "$out" | grep -c '^mac-secure: ')" "lines with the prefix"
+  assert_eq 4 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "lines"
+  out=$(mac_secure notices --json)
+  assert_json "$out"
+  assert_contains "$out" '{"id":"malware-package","severity":"high","notice":"1 package matches a malware advisory."'
+  assert_contains "$out" '"id":"known-exploited-new"'
+  assert_contains "$out" '"id":"update-run-failed"'
+  assert_contains "$out" '"id":"vuln-scan-stale"'
+}
+
+test_notices_call_a_match_new_when_it_becomes_known_exploited() {
+  local NVM="$HOME/.nvm/versions/node"
+  mkdir -p "$HOME/.config/mac-secure"
+  echo vulns >"$HOME/.config/mac-secure/enabled"
+  vulns_results 0 "$NVM|Critical|CVE-2099-0001|kev|-|fixed|18.99.0|binary|node|18.0.0|$NVM/v18.0.0/bin/node"
+  printf '%s|CVE-2099-0001|node|18.0.0|-|-\t1000\n' "$NVM" >"$HOME/Library/Application Support/mac-secure/vulns/first-seen.tsv"
+  (
+    . "$REPO/lib/common.sh"; . "$REPO/lib/modules.sh"; . "$REPO/lib/vulns.sh"
+    ms_vuln_record_first_seen ""
+  )
+  assert_contains "$(mac_secure notices)" "1 known-exploited vulnerability first found in the last 7 days"
+}
+
+test_vulns_upgrade_dates_matches_the_previous_results_had_as_not_new() {
+  vulns_setup
+  run_daily vulns
+  rm "$VULN_DIR/first-seen.tsv"
+  run_daily vulns
+  assert_contains "$(cat "$VULN_DIR/first-seen.tsv")" "$(printf 'CVE-2099-0001|node|18.0.0|kev|-\t0')"
+  mkdir -p "$HOME/.config/mac-secure"
+  grep -qx vulns "$HOME/.config/mac-secure/enabled" 2>/dev/null || echo vulns >>"$HOME/.config/mac-secure/enabled"
+  assert_not_contains "$(mac_secure notices)" "known-exploited"
+}
+
+test_notices_leave_out_results_once_vulns_is_off() {
+  local NVM="$HOME/.nvm/versions/node"
+  vulns_results 0 "$NVM|Critical|GHSA-mmmm-0000-0003|-|malware|not-fixed||npm|evil-dep|1.0.1|$NVM/x/node_modules/evil-dep/package.json"
+  assert_eq "" "$(mac_secure notices)"
+}
+
+test_vulns_first_seen_keeps_the_first_date_and_drops_gone_matches() {
+  vulns_setup
+  run_daily vulns
+  local file="$VULN_DIR/first-seen.tsv"
+  assert_contains "$(cat "$file")" "CVE-2099-0001|node|18.0.0"
+  sed 's/	[0-9]*$/	1000/' "$file" >"$file.x" && mv "$file.x" "$file"
+  printf 'gone|CVE-1|x|1\t1000\n' >>"$file"
+  run_daily vulns
+  assert_contains "$(cat "$file")" "$(printf 'CVE-2099-0001|node|18.0.0|kev|-\t1000')"
+  assert_not_contains "$(cat "$file")" "gone|CVE-1"
+}
+
+test_session_start_hook_is_silent_without_mac_secure_and_relays_notices() {
+  local hook="$REPO/hooks/session-start" out
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "SessionStart" in d["hooks"]' "$REPO/hooks/hooks.json" || fail "hooks.json lacks hooks.SessionStart"
+  out=$(PATH="/usr/bin:/bin" HOME="$TMP/nohome" "$hook")
+  assert_eq 0 $? "hook exit status"
+  assert_eq "" "$out"
+  mkdir -p "$TMP/bin"
+  printf '#!/bin/bash\n[ "$1" = notices ] && echo "mac-secure: something"\nexit 3\n' >"$TMP/bin/mac-secure"
+  chmod +x "$TMP/bin/mac-secure"
+  out=$(PATH="$TMP/bin:/usr/bin:/bin" "$hook")
+  assert_eq 0 $? "hook exit status when mac-secure fails"
+  assert_eq "mac-secure: something" "$out"
+  mkdir -p "$HOME/.config/mac-secure"
+  echo SESSION_NOTICES=no >"$HOME/.config/mac-secure/config"
+  assert_eq "" "$(PATH="$TMP/bin:/usr/bin:/bin" "$hook")" "output with SESSION_NOTICES=no"
 }
 
 test_vulns_scan_paths_setting_adds_locations() {

@@ -1,0 +1,12 @@
+#!/bin/bash
+# Claude Code adds this hook's output to a new session's context, so an agent learns what mac-secure
+# says needs attention. It prints nothing when nothing does, or when mac-secure is not installed, and
+# always exits 0: a failed hook shows the person an error at every session start.
+
+# The lines go into the session's context, which the agent sends to its model provider, so
+# SESSION_NOTICES=no in mac-secure's config keeps them out. The config is read, never sourced.
+[ "$(sed -n 's/^SESSION_NOTICES=//p' "$HOME/.config/mac-secure/config" 2>/dev/null | tail -1)" != no ] || exit 0
+PATH="$PATH:$HOME/.local/bin"
+command -v mac-secure >/dev/null 2>&1 || exit 0
+mac-secure notices 2>/dev/null
+exit 0

@@ -32,6 +32,13 @@
 #PLAYWRIGHT_PYTHON=python3
 #PLAYWRIGHT_BROWSERS=chromium
 
+# How many days `mac-secure notices` keeps calling a known-exploited vulnerability new.
+#NOTICE_DAYS=7
+
+# no keeps the agent plugin's session-start hook from adding `mac-secure notices` to new sessions.
+# Those lines go to the agent's model provider with the rest of the session.
+#SESSION_NOTICES=yes
+
 # More directories for the vulns module to scan, separated by colons. ~/ is your home folder.
 #VULN_SCAN_PATHS=~/src
 
