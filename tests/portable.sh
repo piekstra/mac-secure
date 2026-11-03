@@ -150,8 +150,8 @@ test_plist_read_error_on_stdout_is_not_taken_for_a_value() {
 test_plist_values_are_read_only_through_the_two_wrappers() {
   local reads wrappers
   reads=$(cd "$REPO" && grep -rn 'plutil -extract' bin jobs lib root | cut -d: -f1 | sort | tr '\n' ' ')
-  assert_eq "lib/status.sh root/macos-update " "$reads" "files reading plists directly"
-  wrappers=$(sed -n 's/.*value=\$(\(plutil -extract.*\)$/\1/p' "$REPO/lib/status.sh" "$REPO/root/macos-update" | sort -u | wc -l | tr -d ' ')
+  assert_eq "lib/common.sh root/macos-update " "$reads" "files reading plists directly"
+  wrappers=$(sed -n 's/.*value=\$(\(plutil -extract.*\)$/\1/p' "$REPO/lib/common.sh" "$REPO/root/macos-update" | sort -u | wc -l | tr -d ' ')
   assert_eq 1 "$wrappers" "the two wrappers should read the same way"
 }
 

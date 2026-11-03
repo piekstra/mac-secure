@@ -448,6 +448,18 @@ audit_vulns() {
   ' >>"$MS_AUDIT_OUT"
 }
 
+audit_eol() {
+  ms_user_enabled eol || return 0
+  if [ ! -f "$MS_EOL_RESULTS" ]; then
+    finding medium eol-check-missing "The eol module is on, but no end-of-life check has finished." "mac-secure run eol, then: mac-secure logs daily"
+    return 0
+  fi
+  if [ -n "$(find "$MS_EOL_RESULTS" -mtime +"$MS_VULN_STALE_DAYS" 2>/dev/null)" ]; then
+    finding medium eol-check-stale "The last end-of-life check is more than $MS_VULN_STALE_DAYS days old." "mac-secure logs daily, or: mac-secure run eol"
+  fi
+  cat "$MS_EOL_RESULTS" >>"$MS_AUDIT_OUT"
+}
+
 ms_audit_collect() {
   MS_AUDIT_OUT=$1
   audit_core
@@ -464,6 +476,7 @@ ms_audit_collect() {
   audit_playwright_browsers
   audit_homebrew
   audit_vulns
+  audit_eol
 }
 
 # Most severe first.

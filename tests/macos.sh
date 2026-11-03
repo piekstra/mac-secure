@@ -426,6 +426,113 @@ test_audit_names_no_copy_for_an_unused_playwright_build() {
   assert_contains "$out" "No installed copy of Playwright uses it: rm -r '$CACHE/chromium-1200'"
 }
 
+# Runtimes on both sides of their end of life, end-of-life lists from the fixtures, and Homebrew
+# packages Homebrew no longer supports. FETCH_FAILS makes every endoflife.date fetch fail.
+eol_setup() {
+  export MS_SYSTEM_LIBRARY="$TMP/Library" MS_DOTNET_ROOT="$TMP/dotnet"
+  mkdir -p "$HOME/.nvm/versions/node/v14.21.3" "$HOME/.nvm/versions/node/v22.23.4" \
+    "$MS_SYSTEM_LIBRARY/Frameworks/Python.framework/Versions/3.9" "$MS_SYSTEM_LIBRARY/Frameworks/Python.framework/Versions/3.13" \
+    "$HOME/.local/share/uv/python/cpython-3.10.22-macos-aarch64-none" "$MS_DOTNET_ROOT/sdk/6.0.108" "$MS_DOTNET_ROOT/sdk/10.0.100"
+  ln -s 3.13 "$MS_SYSTEM_LIBRARY/Frameworks/Python.framework/Versions/Current"
+  ln -s cpython-3.10.22-macos-aarch64-none "$HOME/.local/share/uv/python/cpython-3.10-macos-aarch64-none"
+  stub curl "[ -z \"\${FETCH_FAILS:-}\" ] || exit 22
+    while [ \$# -gt 0 ]; do case \"\$1\" in -o) out=\$2; shift ;; https://*) url=\$1 ;; esac; shift; done
+    cp '$FIXTURES/endoflife-'\"\$(basename \"\$url\")\" \"\$out\""
+  stub brew "case \"\$1\" in
+    info) cat '$FIXTURES/brew-info-installed.json' ;;
+    uses) [ \"\$3\" = openssl@1.1 ] && echo libxmlsec1 ;;
+  esac"
+  EOL_FINDINGS="$HOME/Library/Application Support/mac-secure/eol/findings.tsv"
+}
+
+test_eol_reports_runtimes_past_their_end_and_unsupported_homebrew_packages() {
+  eol_setup
+  run_daily eol
+  assert_eq ok "$(result_of eol)"
+  local out
+  out=$(cat "$EOL_FINDINGS")
+  assert_contains "$out" "Node.js from nvm 14.21.3 at $HOME/.nvm/versions/node/v14.21.3 reached its end of life on 2023-04-30"
+  assert_contains "$out" "nvm uninstall 14.21.3"
+  assert_contains "$out" "Python from python.org 3.9 at $TMP/Library/Frameworks/Python.framework/Versions/3.9 reached its end of life on 2025-10-31"
+  assert_contains "$out" "Python managed by uv 3.10.22"
+  assert_contains "$out" "uv python uninstall 3.10.22"
+  assert_contains "$out" ".NET SDK 6.0.108 at $TMP/dotnet/sdk/6.0.108 reached its end of life on 2024-11-12"
+  assert_not_contains "$out" "22.23.4"
+  assert_not_contains "$out" "Versions/3.13"
+  assert_not_contains "$out" "Versions/Current"
+  assert_not_contains "$out" "cpython-3.10-macos"
+  assert_not_contains "$out" "10.0.100"
+  assert_contains "$out" "$(printf 'medium\thomebrew-unsupported\tHomebrew has disabled the formula python@3.8 (deprecated_upstream)')"
+  assert_contains "$out" "brew uninstall python@3.8"
+  assert_contains "$out" "$(printf 'low\thomebrew-unsupported\tHomebrew has deprecated the formula openssl@1.1 (unsupported)')"
+  assert_contains "$out" "Installed formulae need it: libxmlsec1; remove or replace those first."
+  assert_contains "$out" "$(printf "Check that no project's .nvmrc needs it and that it is not nvm's default (nvm alias default).\tnvm uninstall 14.21.3")"
+  assert_contains "$out" "brew uninstall --cask old-app"
+  assert_not_contains "$out" "jq"
+  mkdir -p "$HOME/.config/mac-secure"
+  echo eol >"$HOME/.config/mac-secure/enabled"
+  assert_contains "$(audit_findings)" '"id":"end-of-life"'
+}
+
+test_eol_without_any_end_of_life_list_is_retried() {
+  eol_setup
+  export FETCH_FAILS=1
+  run_daily eol
+  assert_eq deferred "$(result_of eol)"
+  assert_contains "$(detail_of eol)" "not checked: nodejs python dotnet"
+  assert_contains "$(cat "$EOL_FINDINGS")" "$(printf 'medium\teol-check-incomplete\tThe end-of-life check could not get what it needs for: nodejs python dotnet')"
+}
+
+test_eol_reports_cycles_the_list_does_not_name() {
+  eol_setup
+  mkdir -p "$HOME/.nvm/versions/node/v0.12.18" "$HOME/.nvm/versions/node/v99.0.0" "$HOME/.nvm/versions/node/v1;touch x"
+  run_daily eol
+  local out
+  out=$(cat "$EOL_FINDINGS")
+  assert_contains "$out" "Node.js from nvm 0.12.18 at $HOME/.nvm/versions/node/v0.12.18 has reached its end of life"
+  assert_contains "$out" "$(printf 'low\teol-check-incomplete\tendoflife.date does not list these, so their end of life is not known: Node.js from nvm 99.0.0.')"
+  assert_not_contains "$out" "touch x"
+}
+
+test_eol_keeps_homebrew_findings_when_brew_info_cannot_be_read() {
+  eol_setup
+  run_daily eol
+  stub brew "case \"\$1\" in info) echo 'not json' ;; esac"
+  run_daily eol
+  assert_eq deferred "$(result_of eol)"
+  assert_contains "$(cat "$EOL_FINDINGS")" "brew uninstall python@3.8"
+  assert_contains "$(cat "$EOL_FINDINGS")" "could not get what it needs for: homebrew"
+}
+
+test_eol_keeps_the_last_list_when_its_format_changes() {
+  eol_setup
+  run_daily eol
+  printf '[{"cycle": "26", "endOfLife": "2099-04-30"}]\n' >"$TMP/changed.json"
+  stub curl "while [ \$# -gt 0 ]; do case \"\$1\" in -o) out=\$2; shift ;; esac; shift; done; cp '$TMP/changed.json' \"\$out\""
+  run_daily eol
+  assert_eq ok "$(result_of eol)"
+  assert_contains "$(detail_of eol)" "using the last list for: nodejs python dotnet"
+  assert_contains "$(cat "$EOL_FINDINGS")" "14.21.3"
+}
+
+test_audit_reports_an_old_end_of_life_check() {
+  eol_setup
+  run_daily eol
+  touch -t 202001010000 "$EOL_FINDINGS"
+  mkdir -p "$HOME/.config/mac-secure"
+  echo eol >"$HOME/.config/mac-secure/enabled"
+  assert_contains "$(audit_findings)" '"id":"eol-check-stale"'
+}
+
+test_eol_uses_the_last_lists_when_a_fetch_fails() {
+  eol_setup
+  run_daily eol
+  export FETCH_FAILS=1
+  run_daily eol
+  assert_eq ok "$(result_of eol)"
+  assert_contains "$(cat "$EOL_FINDINGS")" "14.21.3"
+}
+
 test_audit_changes_nothing() {
   audit_setup
   audit_findings >/dev/null

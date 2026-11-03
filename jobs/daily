@@ -777,6 +777,184 @@ EOF
   return 0
 }
 
+# The end-of-life date endoflife.date gives a release cycle, from a list cached by ch_eol: a date,
+# "past" when it says only that the cycle has ended or the cycle is older than every one it lists,
+# "unknown" when it does not list the cycle, or nothing when it names no end yet.
+# Usage: eol_date <list> <cycle>
+eol_date() {
+  local i=0 cycle eol oldest=""
+  while [ "$i" -lt 300 ] && cycle=$(ms_plist_value "$1" "$i.cycle"); do
+    if [ "$cycle" = "$2" ]; then
+      eol=$(ms_plist_value "$1" "$i.eol") || return 0
+      case "$eol" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) echo "$eol" ;;
+        true) echo past ;;
+      esac
+      return 0
+    fi
+    oldest=$cycle
+    i=$((i + 1))
+  done
+  # The lists run newest first, so a cycle older than the last one listed ended before the list begins.
+  if [ -n "$oldest" ] && version_older "$2" "$oldest"; then echo past; else echo unknown; fi
+}
+
+# Usage: version_older <a> <b>   true when dotted version a is older than b.
+version_older() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    n = split(a, x, "."); m = split(b, y, ".")
+    for (i = 1; i <= (n > m ? n : m); i++) {
+      if (x[i] + 0 < y[i] + 0) exit 0
+      if (x[i] + 0 > y[i] + 0) exit 1
+    }
+    exit 1
+  }'
+}
+
+# A list replaces the cached one only when its first entry has the fields this reads, so a changed
+# format keeps the last good list.
+eol_list_usable() {
+  local eol
+  ms_plist_value "$1" 0.cycle >/dev/null || return 1
+  eol=$(ms_plist_value "$1" 0.eol) || return 1
+  case "$eol" in
+    true | false | [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints "<product>|<cycle>|<what>|<version>|<path>|<before removing>|<command>" for each runtime
+# installed in a place mac-secure knows. A folder whose name is not a plain version is skipped: the
+# name goes into a command a person or agent may run.
+eol_runtimes() {
+  local dir version name
+  for dir in "$(ms_nvm_dir)/versions/node"/v[0-9]*; do
+    [ -d "$dir" ] || continue
+    version=${dir##*/v}
+    eol_plain_version "$version" || continue
+    echo "nodejs|${version%%.*}|Node.js from nvm|$version|$dir|Check that no project's .nvmrc needs it and that it is not nvm's default (nvm alias default).|nvm uninstall $version"
+  done
+  for dir in "${MS_SYSTEM_LIBRARY:-/Library}/Frameworks/Python.framework/Versions"/[0-9]*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    version=${dir##*/}
+    eol_plain_version "$version" || continue
+    echo "python|$version|Python from python.org|$version|$dir|Check that no virtual environment uses it, and remove its links in /usr/local/bin too.|sudo rm -rf '$dir'"
+  done
+  for dir in "$HOME/.local/share/uv/python"/cpython-[0-9]*; do
+    # uv also keeps a link per minor version, beside the installation it points at.
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    name=${dir##*/cpython-}
+    version=${name%%-*}
+    eol_plain_version "$version" || continue
+    echo "python|${version%.*}|Python managed by uv|$version|$dir|Check that no project's virtual environment uses it.|uv python uninstall $version"
+  done
+  for dir in "${MS_DOTNET_ROOT:-/usr/local/share/dotnet}/sdk"/[0-9]*; do
+    [ -d "$dir" ] || continue
+    version=${dir##*/}
+    eol_plain_version "$version" || continue
+    # endoflife.date names .NET 5 and later by major version, and earlier ones as major.minor.
+    case "$version" in
+      [0-4].*) name=$(echo "$version" | cut -d. -f1,2) ;;
+      *) name=${version%%.*} ;;
+    esac
+    echo "dotnet|$name|.NET SDK|$version|$dir|Check that no project's global.json needs it.|sudo rm -rf '$dir'"
+  done
+}
+
+eol_plain_version() {
+  printf '%s' "$1" | grep -Eqx '[0-9]+(\.[0-9]+)*'
+}
+
+# Prints Homebrew's own word on what it no longer supports, as audit findings: a disabled package
+# cannot be installed or upgraded any more, a deprecated one soon will not. Returns 1 when the report
+# cannot be read, rather than reading it as nothing unsupported. Homebrew needs the Command Line
+# Tools, so this python3 is never the shim that asks to install them. Usage: eol_homebrew <work dir>
+eol_homebrew() {
+  local work=$1 state kind name reason severity what users action
+  brew info --json=v2 --installed >"$work/brew-info.json" 2>/dev/null || return 1
+  /usr/bin/python3 -I -c '
+import json, sys
+try:
+    report = json.load(open(sys.argv[1]))
+    groups = (("formula", report["formulae"], "name"), ("cask", report["casks"], "token"))
+    rows = []
+    for kind, items, key in groups:
+        for item in items:
+            if item.get("disabled") or item.get("deprecated"):
+                state = "disabled" if item.get("disabled") else "deprecated"
+                reason = str(item.get("disable_reason") or item.get("deprecation_reason") or "")
+                rows.append("|".join([state, kind, item[key], " ".join(reason.split()).replace("|", " ")]))
+except (ValueError, KeyError, TypeError, OSError):
+    sys.exit(3)
+open(sys.argv[2], "w").write("".join(row + "\n" for row in rows))
+' "$work/brew-info.json" "$work/brew-unsupported.txt" || return 1
+  while IFS='|' read -r state kind name reason; do
+    [ -n "$name" ] || continue
+    severity=low
+    [ "$state" != disabled ] || severity=medium
+    what="Homebrew has $state the $kind $name${reason:+ ($reason)}, so it gets no more updates."
+    users=""
+    [ "$kind" != formula ] || users=$(brew uses --installed "$name" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    [ -z "$users" ] || what="$what Installed formulae need it: $users; remove or replace those first."
+    action="brew uninstall $name"
+    [ "$kind" != cask ] || action="brew uninstall --cask $name"
+    printf '%s\t%s\t%s\t%s\n' "$severity" homebrew-unsupported "$what" "$action"
+  done <"$work/brew-unsupported.txt"
+}
+
+# Writes audit findings for each installed runtime past its end of life, and each Homebrew package
+# Homebrew has deprecated or disabled. Removes nothing. Dates come from endoflife.date; a list that
+# cannot be fetched is used from the last fetch for MS_EOL_LIST_DAYS, and what could not be checked
+# becomes a finding too, so an incomplete check never reads as clean.
+ch_eol() {
+  local work product cycle what version path before command date today missing="" stale="" unknown="" count
+  work=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-eol.XXXXXX") || return 1
+  mkdir -p "$MS_EOL_DIR"
+  for product in nodejs python dotnet; do
+    if curl -q -sf --max-time 30 -o "$work/$product.json" "https://endoflife.date/api/$product.json" &&
+      eol_list_usable "$work/$product.json"; then
+      mv -f "$work/$product.json" "$MS_EOL_DIR/$product.json"
+    elif [ -f "$MS_EOL_DIR/$product.json" ] && [ -z "$(find "$MS_EOL_DIR/$product.json" -mtime +"$MS_EOL_LIST_DAYS")" ]; then
+      stale="$stale $product"
+    else
+      rm -f "$MS_EOL_DIR/$product.json"
+      missing="$missing $product"
+    fi
+  done
+  today=$(date +%Y-%m-%d)
+  : >"$work/findings.tsv"
+  while IFS='|' read -r product cycle what version path before command; do
+    [ -n "$product" ] && [ -f "$MS_EOL_DIR/$product.json" ] || continue
+    date=$(eol_date "$MS_EOL_DIR/$product.json" "$cycle")
+    case "$date" in
+      past) printf '%s\t%s\t%s\t%s\n' medium end-of-life "$what $version at $path has reached its end of life, so it gets no more security fixes. $before" "$command" ;;
+      unknown) unknown="$unknown $what $version;" ;;
+      '') ;;
+      *) [ "$date" \> "$today" ] ||
+        printf '%s\t%s\t%s\t%s\n' medium end-of-life "$what $version at $path reached its end of life on $date, so it gets no more security fixes. $before" "$command" ;;
+    esac
+  done >>"$work/findings.tsv" <<EOF
+$(eol_runtimes)
+EOF
+  if command -v brew >/dev/null 2>&1; then
+    if ! eol_homebrew "$work" >"$work/homebrew.tsv"; then
+      missing="$missing homebrew"
+      awk -F'\t' '$2 == "homebrew-unsupported"' "$MS_EOL_RESULTS" 2>/dev/null >"$work/homebrew.tsv"
+    fi
+    cat "$work/homebrew.tsv" >>"$work/findings.tsv"
+  fi
+  [ -z "$missing" ] || printf '%s\t%s\t%s\t%s\n' medium eol-check-incomplete \
+    "The end-of-life check could not get what it needs for:$missing, so those were not checked." "mac-secure run eol, then: mac-secure logs daily" >>"$work/findings.tsv"
+  [ -z "$unknown" ] || printf '%s\t%s\t%s\t%s\n' low eol-check-incomplete \
+    "endoflife.date does not list these, so their end of life is not known:${unknown%;}." "mac-secure run eol" >>"$work/findings.tsv"
+  count=$(awk -F'\t' '$2 == "end-of-life" || $2 == "homebrew-unsupported"' "$work/findings.tsv" | grep -c .)
+  mv -f "$work/findings.tsv" "$MS_EOL_RESULTS"
+  rm -rf "$work"
+  detail "$count past end of life or unsupported; using the last list for:${stale:- none}; not checked:${missing:- none}"
+  [ -z "$missing" ] || return 75
+  return 0
+}
+
 module_limit_seconds() {
   [ -z "${MS_MODULE_LIMIT:-}" ] || { echo "$MS_MODULE_LIMIT"; return; }
   case $1 in
