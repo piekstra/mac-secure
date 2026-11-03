@@ -312,6 +312,8 @@ ch_npm() {
     version=$( (export NVM_DIR="$dir"; . "$script" --no-use >/dev/null 2>&1 && nvm version default) 2>/dev/null)
     case "$version" in
       v[0-9]*)
+        # A run stopped inside npm_restore can leave npm missing, with its launcher pointing nowhere.
+        nvm_recover_npm "$dir/versions/node/$version" || NPM_FAILED="$NPM_FAILED npm($version)"
         if [ -x "$dir/versions/node/$version/bin/npm" ]; then
           nvm_bin="$dir/versions/node/$version/bin"
         else
@@ -335,7 +337,6 @@ ch_npm() {
   fi
   if [ -n "$nvm_bin" ]; then
     nvm_note="; nvm default $version"
-    nvm_recover_npm "${nvm_bin%/bin}" || NPM_FAILED="$NPM_FAILED npm($version)"
     # A check that could not run, such as offline after a wake, means npm is not touched either.
     if PATH="$nvm_bin:$PATH" npm_config_engine_strict=true upgrade_npm_globals npm; then
       nvm_update_npm "$script" "$dir" "$version" || NPM_FAILED="$NPM_FAILED npm($version)"

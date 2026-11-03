@@ -456,9 +456,10 @@ nvm() {
 EOF
   # npm_runs calls node with npm-cli.js; this node runs npm unless the npm folder is marked broken.
   mkdir -p "$root/lib/node_modules/npm/bin"
+  touch "$root/lib/node_modules/npm/bin/npm-cli.js"
   cat >"$root/bin/node" <<'EOF'
 #!/bin/bash
-[ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0
+[ -f "$1" ] && [ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0
 EOF
   chmod +x "$root/bin/node"
   cat >"$root/bin/npm" <<'EOF'
@@ -547,6 +548,19 @@ test_npm_engine_warning_on_another_failure_is_a_failure() {
   run_daily npm
   assert_eq failed "$(result_of npm)"
   assert_contains "$(detail_of npm)" "failed: tool"
+}
+
+test_npm_puts_back_npm_that_a_stopped_run_left_missing() {
+  nvm_setup
+  stub npm 'exit 0'
+  local root="$HOME/.nvm/versions/node/v20.0.0"
+  mv "$root/lib/node_modules/npm" "$root/lib/node_modules/.npm.mac-secure-previous"
+  mv "$root/bin/npm" "$root/lib/node_modules/.npm.mac-secure-previous/npm-launcher"
+  ln -s ../lib/node_modules/npm/npm-launcher "$root/bin/npm"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  [ -x "$root/bin/npm" ] || fail "npm was not put back"
+  assert_called 'nvm-npm install -g ccusage@latest'
 }
 
 test_npm_offline_nvm_check_defers_without_touching_npm() {
