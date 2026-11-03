@@ -42,7 +42,7 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `brew-formulae` | you | yes | Upgrades every Homebrew formula | Running services keep old code until they restart |
 | `brew-casks` | you | yes | Upgrades every cask, including apps that claim to update themselves | Closes an app being upgraded, then reopens it |
 | `adopt-apps` | you | no | Moves the apps in `adopt-apps.txt` under Homebrew, so they update while closed | Replaces each app, closing it if running |
-| `npm` | you | yes | Upgrades global npm packages to latest | A new major version can change how a CLI behaves |
+| `npm` | you | yes | Upgrades global npm packages to latest, in the Node on the job's PATH (Homebrew's, or one added with `EXTRA_PATH`) and in nvm's default Node, where nvm picks the npm that runs on it | A new major version can change how a CLI behaves. On nvm's default Node, a release that declares it needs a newer Node is held back, and an npm that does not run after nvm's update is put back |
 | `rust` | you | yes | Updates Rust toolchains and rustup | None |
 | `cargo` | you | yes | Reinstalls crates installed from crates.io | Compiles from source, which can take many minutes |
 | `cargo-local` | you | no | Rebuilds local-source Rust CLIs whose lockfile has a RustSec advisory | Replaces the installed binary with a build of the default branch |

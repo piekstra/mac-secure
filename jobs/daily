@@ -204,22 +204,153 @@ ch_brew_casks() {
   [ -z "$failed" ]
 }
 
-ch_npm() {
-  local pkg failed="" count=0 pkgs listing rc
+# Upgrades the outdated global packages of the npm first on PATH, except the one named in $1, adding
+# to the caller's NPM_COUNT, NPM_FAILED and NPM_HELD. Returns 75 when the check itself failed. With
+# npm_config_engine_strict=true, npm refuses a release whose engines exclude this Node, with code
+# EBADENGINE, and that package is held back rather than failed.
+upgrade_npm_globals() {
+  local skip=${1:-} pkg pkgs listing rc out
   # Exit 1 means packages are outdated, and also that the check failed. Only the former lists any.
   listing=$(npm outdated -g --parseable 2>/dev/null)
   rc=$?
-  if [ "$rc" -ne 0 ] && [ -z "$listing" ]; then
-    detail "could not check for updates"
-    return 75
-  fi
+  [ "$rc" -eq 0 ] || [ -n "$listing" ] || return 75
   # --parseable fields: path:wanted:current:latest:location, each package written as name@version.
   pkgs=$(printf '%s\n' "$listing" | cut -d: -f4 | sed 's/@[^@]*$//')
   for pkg in $pkgs; do
-    if npm install -g "$pkg@latest"; then count=$((count + 1)); else failed="$failed $pkg"; fi
+    [ "$pkg" != "$skip" ] || continue
+    if out=$(npm install -g "$pkg@latest" 2>&1); then
+      NPM_COUNT=$((NPM_COUNT + 1))
+    elif [ -n "${npm_config_engine_strict:-}" ] && printf '%s\n' "$out" | grep -qE '^npm (ERR!|error) code EBADENGINE'; then
+      NPM_HELD="$NPM_HELD $pkg"
+    else
+      NPM_FAILED="$NPM_FAILED $pkg"
+    fi
+    printf '%s\n' "$out"
   done
-  detail "updated $count; failed:${failed:- none}"
-  [ -z "$failed" ]
+}
+
+# Prints the nvm.sh to source: the one in nvm's folder, or Homebrew's, which keeps the script apart
+# from the Nodes. Usage: nvm_script <nvm dir>
+nvm_script() {
+  local prefix
+  [ ! -s "$1/nvm.sh" ] || { echo "$1/nvm.sh"; return 0; }
+  command -v brew >/dev/null 2>&1 || return 1
+  prefix=$(brew --prefix 2>/dev/null) || return 1
+  [ -s "$prefix/opt/nvm/nvm.sh" ] || return 1
+  echo "$prefix/opt/nvm/nvm.sh"
+}
+
+# Whether a Node's own npm runs on that Node. npm's launcher finds node on PATH, which may be another
+# Node or none, so this calls the Node directly. Usage: npm_runs <Node folder>
+npm_runs() {
+  "$1/bin/node" "$1/lib/node_modules/npm/bin/npm-cli.js" --version >/dev/null 2>&1
+}
+
+# Swaps the copy kept beside npm back in, keeping the replaced npm until the swap is done.
+# Usage: npm_restore <node_modules folder>
+npm_restore() {
+  local modules=$1
+  rm -rf "$modules/.npm.mac-secure-replaced"
+  if [ -e "$modules/npm" ]; then
+    mv "$modules/npm" "$modules/.npm.mac-secure-replaced" || return 1
+  fi
+  if ! mv "$modules/.npm.mac-secure-previous" "$modules/npm"; then
+    mv "$modules/.npm.mac-secure-replaced" "$modules/npm" 2>/dev/null
+    return 1
+  fi
+  rm -rf "$modules/.npm.mac-secure-replaced"
+}
+
+# A run stopped partway can leave the copy nvm_update_npm keeps, and npm missing or not running. This
+# deals with it before anything runs that Node's npm. Usage: nvm_recover_npm <Node folder>
+nvm_recover_npm() {
+  local node=$1 modules=$1/lib/node_modules
+  [ -d "$modules/.npm.mac-secure-previous" ] || return 0
+  if npm_runs "$node"; then
+    rm -rf "$modules/.npm.mac-secure-previous"
+    return 0
+  fi
+  echo "npm on $(basename "$node") does not run; putting back the copy an earlier run kept"
+  npm_restore "$modules" || { echo "could not put back $modules/.npm.mac-secure-previous"; return 1; }
+}
+
+# Runs install-latest-npm for one Node, and puts the previous npm back if the new one does not run
+# there: nvm picks from a table inside it, which an old nvm may not have for a newer npm. The copy
+# sits beside npm, so the swap is a rename on one volume, and a copy that a stopped run left behind
+# is dealt with first. Usage: nvm_update_npm <nvm.sh> <nvm dir> <version>
+nvm_update_npm() {
+  local script=$1 dir=$2 version=$3 node modules previous rc
+  node="$dir/versions/node/$version"
+  modules="$node/lib/node_modules"
+  previous="$modules/.npm.mac-secure-previous"
+  cp -Rp "$modules/npm" "$previous" || { rm -rf "$previous"; return 1; }
+  # shellcheck disable=SC1090
+  ( export NVM_DIR="$dir"; . "$script" --no-use && nvm use --silent "$version" && nvm install-latest-npm )
+  rc=$?
+  if npm_runs "$node"; then
+    rm -rf "$previous"
+    return "$rc"
+  fi
+  echo "npm on $version does not run after nvm install-latest-npm; putting the previous npm back"
+  npm_restore "$modules" || echo "could not put back $previous"
+  return 1
+}
+
+# nvm's Nodes are outside the job's PATH, so its default Node gets its own pass. Only the default:
+# projects pin the others, and a package's newest version may not run on them. On the default, a
+# release that declares it does not run there is held back, and npm itself is left to nvm.
+ch_npm() {
+  local dir script version nvm_bin="" used=0 nvm_note="" unchecked=""
+  local NPM_COUNT=0 NPM_FAILED="" NPM_HELD=""
+  dir=$(ms_nvm_dir)
+  if [ -n "$(ms_config_get NVM_DIR)" ] && [ ! -d "$dir/versions/node" ]; then
+    used=1
+    unchecked="$unchecked NVM_DIR $dir has no versions/node"
+  elif script=$(nvm_script "$dir"); then
+    used=1
+    # shellcheck disable=SC1090
+    version=$( (export NVM_DIR="$dir"; . "$script" --no-use >/dev/null 2>&1 && nvm version default) 2>/dev/null)
+    case "$version" in
+      v[0-9]*)
+        if [ -x "$dir/versions/node/$version/bin/npm" ]; then
+          nvm_bin="$dir/versions/node/$version/bin"
+        else
+          unchecked="$unchecked nvm $version has no npm"
+        fi
+        ;;
+      system) nvm_note="; nvm default is the system Node" ;;
+      *)
+        if [ -f "$dir/alias/default" ]; then
+          unchecked="$unchecked nvm default $(cat "$dir/alias/default") does not resolve"
+        else
+          nvm_note="; nvm has no default Node"
+        fi
+        ;;
+    esac
+  fi
+  # When EXTRA_PATH puts nvm's default Node first, its own pass below covers it.
+  if command -v npm >/dev/null 2>&1 && [ "$(command -v npm)" != "$nvm_bin/npm" ]; then
+    used=1
+    upgrade_npm_globals || unchecked="$unchecked $(command -v npm)"
+  fi
+  if [ -n "$nvm_bin" ]; then
+    nvm_note="; nvm default $version"
+    nvm_recover_npm "${nvm_bin%/bin}" || NPM_FAILED="$NPM_FAILED npm($version)"
+    # A check that could not run, such as offline after a wake, means npm is not touched either.
+    if PATH="$nvm_bin:$PATH" npm_config_engine_strict=true upgrade_npm_globals npm; then
+      nvm_update_npm "$script" "$dir" "$version" || NPM_FAILED="$NPM_FAILED npm($version)"
+    else
+      unchecked="$unchecked nvm $version"
+    fi
+  fi
+  if [ "$used" -eq 0 ]; then
+    detail "not in use"
+    return 0
+  fi
+  detail "updated $NPM_COUNT$nvm_note; ${NPM_HELD:+held back for that Node:$NPM_HELD; }${unchecked:+could not check:$unchecked; }failed:${NPM_FAILED:- none}"
+  [ -z "$NPM_FAILED" ] || return 1
+  [ -z "$unchecked" ] || return 75
+  return 0
 }
 
 ch_rust() {

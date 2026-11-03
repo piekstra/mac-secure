@@ -20,4 +20,4 @@ Run `make verify` before you call a change done. It is what CI runs.
 
 ## Tests
 
-`tests/run.sh [filter]` runs `tests/portable.sh` everywhere and `tests/macos.sh` on a Mac. `sandbox` in `run.sh` gives every test a temporary `HOME` and stubs every tool that changes a system; add a new such tool to `STUBBED_TOOLS` before calling it. Data with a real tool's output format goes in `tests/fixtures/`, with dummy values.
+`tests/run.sh [filter]` runs `tests/portable.sh` everywhere and `tests/macos.sh` on a Mac. `sandbox` in `run.sh` gives every test a temporary `HOME` and stubs every tool that changes a system; add a new such tool to `STUBBED_TOOLS` before calling it. A tool found through an environment variable or a sourced script rather than `PATH` or `HOME`, such as nvm through `NVM_DIR`, reaches the real system unless `sandbox` clears that variable. Data with a real tool's output format goes in `tests/fixtures/`, with dummy values.
