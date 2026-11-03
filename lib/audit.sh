@@ -188,12 +188,21 @@ EOF
   done <"$list"
 }
 
-# Looking inside these can raise a macOS privacy prompt for whatever app runs audit, so a Playwright
-# copy there is reported as unknown rather than read.
+# Looking inside these can raise a macOS privacy prompt for whatever app runs audit, or reach a
+# network or removable volume, so a Playwright copy or cache there is reported as unknown, not read.
 playwright_path_is_protected() {
   case "$1" in
     "$HOME/Desktop" | "$HOME/Desktop/"* | "$HOME/Documents" | "$HOME/Documents/"* | "$HOME/Downloads" | "$HOME/Downloads/"* | \
-      "$HOME/Library/Mobile Documents/"* | /Volumes/*) return 0 ;;
+      "$HOME/Pictures" | "$HOME/Pictures/"* | "$HOME/Music" | "$HOME/Music/"* | "$HOME/Movies" | "$HOME/Movies/"* | \
+      "$HOME/Library/Mobile Documents/"* | "$HOME/Library/CloudStorage/"* | /Volumes/* | /Network/* | /net/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Where a missing copy can be taken as deleted: places that are always mounted and never guarded.
+playwright_path_can_vanish() {
+  case "$1" in
+    "$HOME/"* | /private/tmp/* | /tmp/* | /private/var/folders/* | /var/folders/* | /opt/* | /usr/local/* | /Library/* | /Applications/*) return 0 ;;
   esac
   return 1
 }
@@ -210,7 +219,10 @@ playwright_build_users() {
       echo "unreadable|$path|"
       continue
     fi
-    [ -d "$path" ] || continue
+    if [ ! -d "$path" ]; then
+      playwright_path_can_vanish "$path" || echo "unreadable|$path|"
+      continue
+    fi
     i=0 found=0
     while [ "$i" -lt 100 ] && name=$(ms_plist_value "$path/browsers.json" "browsers.$i.name"); do
       found=1
@@ -261,7 +273,13 @@ audit_playwright_browsers() {
   audit_playwright_cache "$cache"
   case "${PLAYWRIGHT_BROWSERS_PATH:-0}" in
     0 | "$cache" | "$cache/") ;;
-    *) audit_playwright_cache "${PLAYWRIGHT_BROWSERS_PATH%/}" ;;
+    *)
+      if playwright_path_is_protected "${PLAYWRIGHT_BROWSERS_PATH%/}"; then
+        finding low playwright-cache-not-checked "Playwright's browser builds in ${PLAYWRIGHT_BROWSERS_PATH%/} were not checked: looking there can raise a privacy prompt, or it is a removable or network volume." "Run npx playwright install from a terminal with access to it, which deletes builds no copy needs."
+      else
+        audit_playwright_cache "${PLAYWRIGHT_BROWSERS_PATH%/}"
+      fi
+      ;;
   esac
 }
 
