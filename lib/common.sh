@@ -12,6 +12,8 @@ MS_AGENT_DIR="$HOME/Library/LaunchAgents"
 MS_EOL_DIR="$MS_STATE_DIR/eol"
 # Audit findings, one tab-separated "severity id finding action" per line, from the eol module.
 MS_EOL_RESULTS="$MS_EOL_DIR/findings.tsv"
+# Days a cached end-of-life list is used while fetching it fails.
+MS_EOL_LIST_DAYS=7
 MS_ROOT_LIBEXEC=${MS_ROOT_LIBEXEC:-/usr/local/libexec/mac-secure}
 MS_ROOT_CONF="$MS_ROOT_LIBEXEC/root.conf"
 MS_ROOT_LOG=${MS_ROOT_LOG:-/var/log/mac-secure/macos.log}

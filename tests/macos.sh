@@ -465,7 +465,8 @@ test_eol_reports_runtimes_past_their_end_and_unsupported_homebrew_packages() {
   assert_contains "$out" "$(printf 'medium\thomebrew-unsupported\tHomebrew has disabled the formula python@3.8 (deprecated_upstream)')"
   assert_contains "$out" "brew uninstall python@3.8"
   assert_contains "$out" "$(printf 'low\thomebrew-unsupported\tHomebrew has deprecated the formula openssl@1.1 (unsupported)')"
-  assert_contains "$out" "Installed formulae need it: libxmlsec1."
+  assert_contains "$out" "Installed formulae need it: libxmlsec1; remove or replace those first."
+  assert_contains "$out" "$(printf "Check that no project's .nvmrc needs it and that it is not nvm's default (nvm alias default).\tnvm uninstall 14.21.3")"
   assert_contains "$out" "brew uninstall --cask old-app"
   assert_not_contains "$out" "jq"
   mkdir -p "$HOME/.config/mac-secure"
@@ -479,6 +480,48 @@ test_eol_without_any_end_of_life_list_is_retried() {
   run_daily eol
   assert_eq deferred "$(result_of eol)"
   assert_contains "$(detail_of eol)" "not checked: nodejs python dotnet"
+  assert_contains "$(cat "$EOL_FINDINGS")" "$(printf 'medium\teol-check-incomplete\tThe end-of-life check could not get what it needs for: nodejs python dotnet')"
+}
+
+test_eol_reports_cycles_the_list_does_not_name() {
+  eol_setup
+  mkdir -p "$HOME/.nvm/versions/node/v0.12.18" "$HOME/.nvm/versions/node/v99.0.0" "$HOME/.nvm/versions/node/v1;touch x"
+  run_daily eol
+  local out
+  out=$(cat "$EOL_FINDINGS")
+  assert_contains "$out" "Node.js from nvm 0.12.18 at $HOME/.nvm/versions/node/v0.12.18 has reached its end of life"
+  assert_contains "$out" "$(printf 'low\teol-check-incomplete\tendoflife.date does not list these, so their end of life is not known: Node.js from nvm 99.0.0.')"
+  assert_not_contains "$out" "touch x"
+}
+
+test_eol_keeps_homebrew_findings_when_brew_info_cannot_be_read() {
+  eol_setup
+  run_daily eol
+  stub brew "case \"\$1\" in info) echo 'not json' ;; esac"
+  run_daily eol
+  assert_eq deferred "$(result_of eol)"
+  assert_contains "$(cat "$EOL_FINDINGS")" "brew uninstall python@3.8"
+  assert_contains "$(cat "$EOL_FINDINGS")" "could not get what it needs for: homebrew"
+}
+
+test_eol_keeps_the_last_list_when_its_format_changes() {
+  eol_setup
+  run_daily eol
+  printf '[{"cycle": "26", "endOfLife": "2099-04-30"}]\n' >"$TMP/changed.json"
+  stub curl "while [ \$# -gt 0 ]; do case \"\$1\" in -o) out=\$2; shift ;; esac; shift; done; cp '$TMP/changed.json' \"\$out\""
+  run_daily eol
+  assert_eq ok "$(result_of eol)"
+  assert_contains "$(detail_of eol)" "using the last list for: nodejs python dotnet"
+  assert_contains "$(cat "$EOL_FINDINGS")" "14.21.3"
+}
+
+test_audit_reports_an_old_end_of_life_check() {
+  eol_setup
+  run_daily eol
+  touch -t 202001010000 "$EOL_FINDINGS"
+  mkdir -p "$HOME/.config/mac-secure"
+  echo eol >"$HOME/.config/mac-secure/enabled"
+  assert_contains "$(audit_findings)" '"id":"eol-check-stale"'
 }
 
 test_eol_uses_the_last_lists_when_a_fetch_fails() {

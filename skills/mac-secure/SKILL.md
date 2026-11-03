@@ -36,7 +36,7 @@ A session can start with lines beginning `mac-secure:`, from the plugin's start-
 
 ## End-of-life findings
 
-`end-of-life` and `homebrew-unsupported` name a runtime or package that no longer gets fixes, with the command that removes it. Before proposing removal, look for what uses it: `.nvmrc` files for Node, `pyvenv.cfg` files naming that Python, `global.json` for .NET, and the dependents the finding lists for Homebrew. List what you found and let the user decide per item.
+`end-of-life` and `homebrew-unsupported` name a runtime or package that no longer gets fixes; the finding says what to check first and the action is the command that removes it. `eol-check-incomplete`, `eol-check-stale` and `eol-check-missing` mean the check did not cover everything; say so rather than reporting the Mac as clean. Before proposing removal, look for what uses it: `.nvmrc` files for Node, `pyvenv.cfg` files naming that Python, `global.json` for .NET, and the dependents the finding lists for Homebrew. List what you found and let the user decide per item.
 
 ## Changing the Mac
 
