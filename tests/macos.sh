@@ -497,7 +497,9 @@ test_eol_reads_prerelease_versions_and_keeps_an_old_list() {
   assert_eq deferred "$(result_of eol)"
   out=$(cat "$EOL_FINDINGS")
   assert_contains "$out" "Node.js from nvm 14.21.3"
-  assert_contains "$out" "could not get what it needs for: nodejs"
+  assert_contains "$out" "The end-of-life dates for: nodejs come from a list fetched more than 7 days ago"
+  assert_not_contains "$out" "could not get what it needs for: nodejs"
+  assert_contains "$(detail_of eol)" "list older than 7 days for: nodejs"
 }
 
 test_eol_reports_cycles_the_list_does_not_name() {
@@ -507,7 +509,7 @@ test_eol_reports_cycles_the_list_does_not_name() {
   local out
   out=$(cat "$EOL_FINDINGS")
   assert_contains "$out" "Node.js from nvm 0.12.18 at $HOME/.nvm/versions/node/v0.12.18 has reached its end of life"
-  assert_contains "$out" "$(printf 'low\teol-check-incomplete\tendoflife.date does not list these, so their end of life is not known: Node.js from nvm 99.0.0.')"
+  assert_contains "$out" "$(printf 'low\teol-check-incomplete\tThe end-of-life list in use does not name these, so their end of life is not known: Node.js from nvm 99.0.0.')"
   assert_not_contains "$out" "touch x"
 }
 

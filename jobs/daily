@@ -912,10 +912,11 @@ open(sys.argv[2], "w").write("".join(row + "\n" for row in rows))
 
 # Writes audit findings for each installed runtime past its end of life, and each Homebrew package
 # Homebrew has deprecated or disabled. Removes nothing. Dates come from endoflife.date; a list that
-# cannot be fetched is used from the last fetch for MS_EOL_LIST_DAYS, and what could not be checked
-# becomes a finding too, so an incomplete check never reads as clean.
+# cannot be fetched is used from the last fetch, and once that is older than MS_EOL_LIST_DAYS the
+# check says so and defers. What could not be checked becomes a finding too, so an incomplete check
+# never reads as clean.
 ch_eol() {
-  local work product cycle what version path before command date today missing="" stale="" unknown="" count
+  local work product cycle what version path before command date today missing="" stale="" old="" unknown="" count
   work=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-eol.XXXXXX") || return 1
   mkdir -p "$MS_EOL_DIR"
   for product in nodejs python dotnet; do
@@ -924,9 +925,11 @@ ch_eol() {
       mv -f "$work/$product.json" "$MS_EOL_DIR/$product.json"
     elif [ -f "$MS_EOL_DIR/$product.json" ] && [ -z "$(find "$MS_EOL_DIR/$product.json" -mtime +"$MS_EOL_LIST_DAYS")" ]; then
       stale="$stale $product"
+    elif [ -f "$MS_EOL_DIR/$product.json" ]; then
+      # An old list still holds dates already past, so it stays in use, reported as old until a
+      # list can be fetched again.
+      old="$old $product"
     else
-      # An old list still holds dates already past, so it stays in use; the check is reported
-      # incomplete until a list can be fetched again.
       missing="$missing $product"
     fi
   done
@@ -954,13 +957,15 @@ EOF
   fi
   [ -z "$missing" ] || printf '%s\t%s\t%s\t%s\n' medium eol-check-incomplete \
     "The end-of-life check could not get what it needs for:$missing, so those were not checked." "mac-secure run eol, then: mac-secure logs daily" >>"$work/findings.tsv"
+  [ -z "$old" ] || printf '%s\t%s\t%s\t%s\n' medium eol-check-incomplete \
+    "The end-of-life dates for:$old come from a list fetched more than $MS_EOL_LIST_DAYS days ago, so later changes are missing." "mac-secure run eol, then: mac-secure logs daily" >>"$work/findings.tsv"
   [ -z "$unknown" ] || printf '%s\t%s\t%s\t%s\n' low eol-check-incomplete \
-    "endoflife.date does not list these, so their end of life is not known:${unknown%;}." "mac-secure run eol" >>"$work/findings.tsv"
+    "The end-of-life list in use does not name these, so their end of life is not known:${unknown%;}." "mac-secure run eol" >>"$work/findings.tsv"
   count=$(awk -F'\t' '$2 == "end-of-life" || $2 == "homebrew-unsupported"' "$work/findings.tsv" | grep -c .)
   mv -f "$work/findings.tsv" "$MS_EOL_RESULTS"
   rm -rf "$work"
-  detail "$count past end of life or unsupported; using the last list for:${stale:- none}; not checked:${missing:- none}"
-  [ -z "$missing" ] || return 75
+  detail "$count past end of life or unsupported; using the last list for:${stale:- none}; list older than $MS_EOL_LIST_DAYS days for:${old:- none}; not checked:${missing:- none}"
+  [ -z "$missing$old" ] || return 75
   return 0
 }
 
