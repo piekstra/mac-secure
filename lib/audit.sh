@@ -188,18 +188,24 @@ EOF
   done <"$list"
 }
 
-# Prints "<browser>-<revision>|<path>" for each browser build an installed copy of Playwright needs.
-# Each file in .links holds the path of one copy, whose browsers.json lists the revisions it uses.
+# Prints "<browser>-<revision>|<path>" for each browser build an installed copy of Playwright needs,
+# and "unreadable|<path>" for a copy whose list could not be read. Each file in .links holds the
+# path of one copy, whose browsers.json lists the revisions it uses.
 playwright_build_users() {
-  local link path
+  local link path i name revision found
   for link in "$1/.links"/*; do
     [ -f "$link" ] || continue
     path=$(cat "$link")
-    [ -f "$path/browsers.json" ] || continue
-    awk -F'"' -v path="$path" '
-      /"name":/ { name = $4 }
-      /"revision":/ && (name == "chromium" || name == "firefox") { print name "-" $4 "|" path }
-    ' "$path/browsers.json"
+    [ -d "$path" ] || continue
+    i=0 found=0
+    while [ "$i" -lt 100 ] && name=$(ms_plist_value "$path/browsers.json" "browsers.$i.name"); do
+      found=1
+      case "$name" in
+        chromium|firefox) revision=$(ms_plist_value "$path/browsers.json" "browsers.$i.revision") && echo "$name-$revision|$path" ;;
+      esac
+      i=$((i + 1))
+    done
+    [ "$found" -eq 1 ] || echo "unreadable|$path"
   done
 }
 
@@ -207,8 +213,10 @@ playwright_build_users() {
 # browser, or than the newest build Playwright has here, lacks the security fixes released since.
 # Playwright deletes a build once no installed copy needs it, so the finding names those copies.
 audit_playwright_browsers() {
-  local cache=${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright} dir build kind plist version builds="" users
-  local newest_chromium=0 newest_firefox=0 installed newest label reference used_by action
+  local cache=$HOME/Library/Caches/ms-playwright dir build kind plist version builds="" users unreadable
+  local newest_chromium=0 newest_firefox=0 installed newest label browser reference used_by action
+  # 0 puts each copy's browsers in its own node_modules, so the shared cache still holds any others.
+  case "${PLAYWRIGHT_BROWSERS_PATH:-0}" in 0) ;; *) cache=$PLAYWRIGHT_BROWSERS_PATH ;; esac
   [ -d "$cache" ] || return 0
   for dir in "$cache"/chromium-[0-9]* "$cache"/firefox-[0-9]*; do
     [ -d "$dir" ] || continue
@@ -227,18 +235,22 @@ audit_playwright_browsers() {
   done
   [ -n "$builds" ] || return 0
   users=$(playwright_build_users "$cache")
+  unreadable=$(printf '%s\n' "$users" | awk -F'|' -v home="$HOME" '
+    $1 == "unreadable" { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
+    END { print out }')
   while IFS='|' read -r kind build version; do
     [ -n "$build" ] || continue
     if [ "$kind" = chromium ]; then
-      label=Chromium newest=$newest_chromium
-      installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/Google Chrome.app/Contents/Info.plist" CFBundleShortVersionString) && reference="Google Chrome"
+      label=Chromium newest=$newest_chromium browser="Google Chrome"
     else
-      label=Firefox newest=$newest_firefox
-      installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/Firefox.app/Contents/Info.plist" CFBundleShortVersionString) && reference=Firefox
+      label=Firefox newest=$newest_firefox browser=Firefox
     fi
+    # The reference is whichever is newer, the installed browser or the newest cached build.
+    reference="the newest build Playwright has here,"
+    installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/$browser.app/Contents/Info.plist" CFBundleShortVersionString) || installed=""
     case "${installed%%.*}" in
-      ''|*[!0-9]*) reference="the newest build Playwright has here," ;;
-      *) [ "${installed%%.*}" -le "$newest" ] || newest=${installed%%.*} ;;
+      ''|*[!0-9]*) ;;
+      *) if [ "${installed%%.*}" -ge "$newest" ]; then newest=${installed%%.*} reference=$browser; fi ;;
     esac
     [ "${version%%.*}" -lt "$newest" ] || continue
     used_by=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" -v home="$HOME" '
@@ -246,6 +258,8 @@ audit_playwright_browsers() {
       END { print out }')
     if [ -n "$used_by" ]; then
       action="Update or remove the Playwright copies that use it: $used_by. Playwright deletes a build once no copy needs it."
+    elif [ -n "$unreadable" ]; then
+      action="Which copies use it is unknown, since these copies' browser lists could not be read: $unreadable. Update them; Playwright deletes a build once no copy needs it."
     else
       action="No installed copy of Playwright uses it. The next playwright install deletes it, or delete $cache/$build."
     fi
