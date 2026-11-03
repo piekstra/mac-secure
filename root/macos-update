@@ -36,10 +36,13 @@ record_result() {
   printf '%s\t%s\t%s\t0\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$1" "$2" "$3" >>"$RESULTS.new"
 }
 
+# A copy rather than a rename: a run publishes before a restart and again at the end, and keeps
+# adding to the same .new between. cp creates the file under this job's umask, so the mode is set on
+# the copy too, or a first run leaves it unreadable to status.
 publish_results() {
   [ -f "$RESULTS.new" ] || return 0
-  chmod 644 "$RESULTS.new"
   cp -f "$RESULTS.new" "$RESULTS"
+  chmod 644 "$RESULTS"
 }
 
 module_on() { grep -qxF "$1" "$CONF" 2>/dev/null; }

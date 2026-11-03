@@ -713,12 +713,16 @@ ch_vulns() {
   : >"$work/latest.tsv"
   : >"$work/coverage.txt"
   : >"$work/gaps.tsv"
+  : >"$work/gaps-locations.tsv"
   extra=$(ms_vuln_extra_targets)
   # A location that could not be scanned keeps its previous results, so a failed scan never reads as clean.
   while IFS= read -r target; do
+    # A configured location that is missing, such as an unplugged drive, can stay missing for weeks:
+    # a gap to report, which would otherwise hold back the stamp for every location that scanned.
     if [ ! -d "$target" ]; then
       printf '%s\n' "$extra" | grep -qxF "$target" || continue
-      failed="$failed $target"
+      printf '%s\t%s\n' "$target, from VULN_SCAN_PATHS, was not there to scan, so its results are from an earlier scan." \
+        "Connect or restore it, or remove it from VULN_SCAN_PATHS." >>"$work/gaps-locations.tsv"
       awk -F'\t' -v t="$target" '$1 == t && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
       continue
     fi
@@ -750,6 +754,7 @@ EOF
   mv -f "$work/latest.tsv" "$MS_VULN_RESULTS"
   mv -f "$work/coverage.txt" "$MS_VULN_COVERAGE"
   mv -f "$work/gaps.tsv" "$MS_VULN_GAPS"
+  mv -f "$work/gaps-locations.tsv" "$MS_VULN_LOCATION_GAPS"
   # The stamp marks the last complete scan, so repeated partial failures surface as a stale scan.
   [ -n "$failed" ] || date +%s >"$MS_VULN_STAMP"
   after=$(ms_vuln_urgent_keys)
