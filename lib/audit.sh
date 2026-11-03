@@ -202,7 +202,9 @@ audit_homebrew() {
 audit_vulns() {
   local age
   if [ ! -f "$MS_VULN_RESULTS" ]; then
-    if ms_user_enabled vulns; then
+    if ms_user_enabled vulns && ! ms_module_available vulns; then
+      finding medium vuln-scan-missing "The vulns module is on, but $(ms_module_missing_tool vulns) is not installed, so nothing is scanned." "brew install grype syft"
+    elif ms_user_enabled vulns; then
       finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
     else
       finding low vuln-scan-off "Installed tools, packages and apps are not checked for known vulnerabilities." "brew install grype syft; mac-secure enable vulns"
@@ -263,7 +265,7 @@ audit_vulns() {
           (nkev[t] > 0 || fixable[t] > 0) ? "high" : "medium", what, top, (t == "homebrew" ? "homebrew" : show(t))
       }
       if (lower > 0) printf "info\tlower-vulnerabilities\t%s in %s.\tmac-secure vulns --all\n",
-        count_of(lower, "medium or low vulnerability", "medium or low vulnerabilities"), count_of(nquiet, "location", "locations")
+        count_of(lower, "medium, low or unscored vulnerability", "medium, low or unscored vulnerabilities"), count_of(nquiet, "location", "locations")
     }
   ' >>"$MS_AUDIT_OUT"
 }

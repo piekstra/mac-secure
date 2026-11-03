@@ -16,7 +16,12 @@ MS_VULN_STALE_DAYS=3
 
 # Where tools, runtimes, editor extensions and apps get installed. The scan reads what is installed
 # in each, not what a lockfile there declares, so a cloned repository's dependencies do not count.
+# Each location appears once, without a trailing slash, since results are keyed by location.
 ms_vuln_targets() {
+  ms_vuln_target_lines | sed 's|//*$||' | awk 'NF && !seen[$0]++'
+}
+
+ms_vuln_target_lines() {
   local prefix extra path
   cat <<EOF
 $HOME/.nvm/versions/node
@@ -48,20 +53,23 @@ EOF
   done
 }
 
-# The results without the matches listed in vulns-ignore.txt, as `<id>` or `<id>|<path part>|<why>`.
+# The well-formed results without the matches listed in vulns-ignore.txt, as `<id>` or
+# `<id>|<path part>|<why>`. Every reader goes through here, so a malformed row cannot shift columns.
 ms_vulns_effective() {
   local ignore=/dev/null
   [ -f "$MS_VULN_RESULTS" ] || return 1
   [ ! -f "$MS_VULN_IGNORE" ] || ignore=$MS_VULN_IGNORE
-  awk -F'\t' '
+  awk -F'\t' -v home="$HOME" '
     FILENAME == ARGV[1] {
       if ($0 ~ /^[[:space:]]*(#|$)/) next
       n++
       ids[n] = $0; sub(/\|.*/, "", ids[n]); gsub(/[[:space:]]/, "", ids[n])
       parts[n] = ""
       if (index($0, "|")) { parts[n] = substr($0, index($0, "|") + 1); sub(/\|.*/, "", parts[n]); gsub(/^[[:space:]]+|[[:space:]]+$/, "", parts[n]) }
+      if (substr(parts[n], 1, 2) == "~/") parts[n] = home substr(parts[n], 2)
       next
     }
+    NF != 11 { next }
     {
       for (i = 1; i <= n; i++) if ($3 == ids[i] && (parts[i] == "" || index($11, parts[i]))) next
       print
@@ -89,7 +97,8 @@ ms_vuln_scan_age_days() {
 # Usage: ms_vulns_list <all|high> [filter]
 ms_vulns_list() {
   ms_vulns_effective | awk -F'\t' -v OFS='\t' -v scope="$1" -v filter="${2:-}" '
-    filter != "" && !index($1, filter) && !index($11, filter) && !index($9, filter) { next }
+    filter == "homebrew" && $1 != "homebrew" { next }
+    filter != "" && filter != "homebrew" && !index($1, filter) && !index($11, filter) && !index($9, filter) { next }
     scope != "all" && $2 != "Critical" && $2 != "High" && $5 != "malware" { next }
     { rank = ($5 == "malware") ? 0 : ($2 == "Critical") ? 1 : ($2 == "High") ? 2 : ($2 == "Medium") ? 3 : ($2 == "Low") ? 4 : 5
       print rank, $0 }

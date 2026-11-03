@@ -101,6 +101,21 @@ test_status_json_is_valid_and_reports_state() {
   assert_contains "$out" '"root_job":"not-installed"'
 }
 
+# Installed jobs run from a copy, so a library a job sources but the copy leaves out breaks only installed Macs.
+test_installed_job_copy_has_every_library_the_jobs_source() {
+  ROOT=$REPO
+  . "$REPO/lib/common.sh"
+  . "$REPO/lib/modules.sh"
+  . "$REPO/lib/install.sh"
+  ms_install_app_copy
+  local file
+  for file in $(sed -n 's|^\. "\$ROOT/\(lib/[a-z]*\.sh\)"$|\1|p' "$REPO/jobs/daily" "$REPO/jobs/enforcer"); do
+    [ -f "$MS_APP_DIR/$file" ] || fail "the job copy has no $file"
+  done
+  "$MS_APP_DIR/jobs/daily" rust </dev/null
+  assert_eq ok "$(result_of rust)"
+}
+
 test_status_changes_nothing() {
   mac_secure status --json >/dev/null
   mac_secure status >/dev/null
@@ -555,8 +570,8 @@ vulns_setup() {
   export MS_SYSTEM_LIBRARY="$TMP/Library"
   # shellcheck disable=SC2016
   stub syft 'for a in "$@"; do case "$a" in syft-json=*) echo "{}" >"${a#syft-json=}" ;; esac; done'
-  stub grype "case \"\$1\" in sbom:*) cat '$FIXTURES/grype-matches.txt' ;; esac"
-  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) cat '$FIXTURES/brew-vulns.json'; exit 1 ;; esac"
+  stub grype "case \"\$1\" in sbom:*) cat \"\${GRYPE_FIXTURE:-$FIXTURES/grype-matches.txt}\" ;; esac"
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) [ \"\$2\" = --help ] && exit 0; cat '$FIXTURES/brew-vulns.json'; exit 1 ;; esac"
   VULN_DIR="$HOME/Library/Application Support/mac-secure/vulns"
 }
 
@@ -599,6 +614,9 @@ test_vulns_records_installed_packages_and_drops_other_manifests() {
   assert_contains "$results" "$(printf 'homebrew\tHigh\tCVE-2099-0100\t-\t-\tfixed\t1.0.1')"
   assert_contains "$results" "$(printf 'homebrew\tUnknown\tCVE-2099-0102')"
   assert_contains "$(detail_of vulns)" "6 critical or high, 1 known exploited, 1 malware"
+  assert_contains "$results" "$(printf 'High\tGHSA-aaaa-bbbb-0001\t-\t-\tfixed')"
+  assert_called "syft scan dir:$HOME/.nvm/versions/node -c "
+  assert_contains "$(grep '^grype sbom:' "$CALLS")" " -c "
   assert_contains "$(detail_of vulns)" "3 formulae checked, 1 skipped"
   assert_called 'grype db update'
   [ -s "$VULN_DIR/scanned-at" ] || fail "a complete scan was not stamped"
@@ -619,26 +637,68 @@ test_vulns_failed_location_keeps_its_previous_results_and_defers() {
 test_vulns_unreadable_homebrew_report_is_not_read_as_clean() {
   vulns_setup
   run_daily vulns
-  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) echo 'Error: no network'; exit 1 ;; esac"
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) [ \"\$2\" = --help ] && exit 0; echo 'Error: no network' >&2; exit 1 ;; esac"
   run_daily vulns
   assert_eq deferred "$(result_of vulns)"
   assert_contains "$(detail_of vulns)" "failed: homebrew"
+  assert_contains "$(cat "$HOME/Library/Logs/mac-secure/"*.log)" "Error: no network"
   assert_contains "$(cat "$VULN_DIR/latest.tsv")" "CVE-2099-0101"
 }
 
-test_vulns_without_syft_fails_and_names_the_fix() {
+test_vulns_without_either_tool_is_skipped_and_names_it() {
   vulns_setup
   rm "$STUBS/syft"
   run_daily vulns
-  assert_eq failed "$(result_of vulns)"
-  assert_contains "$(detail_of vulns)" "brew install syft"
-}
-
-test_vulns_without_grype_is_skipped() {
-  vulns_setup
+  assert_eq skipped "$(result_of vulns)"
+  assert_eq "syft not installed" "$(detail_of vulns)"
+  stub syft
   rm "$STUBS/grype"
   run_daily vulns
-  assert_eq skipped "$(result_of vulns)"
+  assert_eq "grype not installed" "$(detail_of vulns)"
+  assert_eq no "$(mac_secure modules --json | python3 -I -c 'import json,sys; print([m["available"] for m in json.load(sys.stdin) if m["id"]=="vulns"][0])')"
+}
+
+test_audit_names_the_missing_tool_when_vulns_is_on() {
+  mkdir -p "$HOME/.config/mac-secure"
+  echo vulns >"$HOME/.config/mac-secure/enabled"
+  PATH="$STUBS:/usr/bin:/bin"
+  rm "$STUBS/grype"
+  assert_contains "$(audit_vulns_only)" "but grype is not installed, so nothing is scanned."
+}
+
+test_vulns_homebrew_without_brew_vulns_is_a_reported_gap_not_a_failure() {
+  vulns_setup
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; vulns) echo 'Error: Unknown command: vulns' >&2; exit 1 ;; esac"
+  run_daily vulns
+  assert_eq ok "$(result_of vulns)"
+  assert_contains "$(detail_of vulns)" "this Homebrew has no brew vulns"
+  [ -s "$VULN_DIR/scanned-at" ] || fail "the scan was not stamped as complete"
+  assert_not_contains "$(cat "$VULN_DIR/latest.tsv")" "homebrew"
+}
+
+test_vulns_malformed_rows_are_never_read() {
+  local NVM="$HOME/.nvm/versions/node"
+  vulns_results 0 \
+    "$NVM|Critical|CVE-2099-0001|kev|-|fixed|18.99.0|binary|node|18.0.0|$NVM/v18.0.0/bin/node" \
+    "$NVM|Critical|CVE-2099-0009|kev|-|fixed|binary|node|18.0.0|$NVM/v18.0.0/bin/node"
+  assert_not_contains "$(mac_secure vulns --all --json)" "CVE-2099-0009"
+  assert_not_contains "$(audit_vulns_only)" "CVE-2099-0009"
+}
+
+test_vulns_command_changes_nothing() {
+  mac_secure vulns >/dev/null 2>&1
+  vulns_results 0 "$HOME/x|High|CVE-2099-0004|-|-|fixed|2.0.0|npm|b|1.0.0|$HOME/x/node_modules/b/package.json"
+  local before
+  before=$(find "$HOME" | sort)
+  mac_secure vulns >/dev/null
+  mac_secure vulns --json >/dev/null
+  mac_secure vulns --all b >/dev/null
+  assert_eq "$before" "$(find "$HOME" | sort)" "files under HOME"
+  assert_not_called "sudo"
+  assert_not_called "grype"
+  assert_not_called "syft"
+  assert_not_called "brew"
+  assert_not_called "osascript"
 }
 
 test_vulns_notifies_only_about_new_urgent_matches() {
@@ -649,6 +709,61 @@ test_vulns_notifies_only_about_new_urgent_matches() {
   : >"$CALLS"
   run_daily vulns
   assert_not_called 'osascript'
+}
+
+test_vulns_notifies_when_a_later_scan_finds_a_new_urgent_match() {
+  vulns_setup
+  run_daily vulns
+  : >"$CALLS"
+  { cat "$FIXTURES/grype-matches.txt"
+    printf 'Critical\tCVE-2099-0050\t-\tA new one\tfixed\t2.0.0\tnpm\tnew-thing\t1.0.0\t/v18.0.0/lib/node_modules/new-thing/package.json\n'
+  } >"$TMP/more.txt"
+  export GRYPE_FIXTURE="$TMP/more.txt"
+  run_daily vulns
+  assert_contains "$(cat "$CALLS")" '1 new critical, known-exploited or malware'
+}
+
+test_vulns_reads_a_description_cut_inside_a_character() {
+  vulns_setup
+  export LC_ALL=en_US.UTF-8
+  printf 'High\tCVE-2099-0070\t-\tAIOHTTP leaks \342\200\tfixed\t3.9.4\tpython\taiohttp\t3.9.3\t/v18.0.0/lib/python/aiohttp-3.9.3.dist-info/METADATA\n' >"$TMP/cut.txt"
+  export GRYPE_FIXTURE="$TMP/cut.txt"
+  run_daily vulns
+  assert_eq ok "$(result_of vulns)"
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "CVE-2099-0070"
+}
+
+test_vulns_reads_a_location_inside_node_modules() {
+  vulns_setup
+  rm -r "$HOME/.nvm"
+  mkdir -p "$HOME/lib/node_modules" "$HOME/.config/mac-secure"
+  echo "VULN_SCAN_PATHS=~/lib/node_modules" >"$HOME/.config/mac-secure/config"
+  printf 'High\tCVE-2099-0060\t-\tA bug\tfixed\t1.0.1\tnpm\tminimist\t1.0.0\t/minimist/package.json\n' >"$TMP/nm.txt"
+  export GRYPE_FIXTURE="$TMP/nm.txt"
+  run_daily vulns
+  assert_contains "$(cat "$VULN_DIR/latest.tsv")" "$HOME/lib/node_modules/minimist/package.json"
+}
+
+test_vulns_lists_a_location_once_however_it_is_written() {
+  PATH="$STUBS:$PATH"
+  . "$REPO/lib/common.sh"
+  . "$REPO/lib/vulns.sh"
+  mkdir -p "$MS_CONFIG_DIR"
+  echo 'VULN_SCAN_PATHS=~/.nvm/versions/node/:~/src//' >"$MS_CONFIG_DIR/config"
+  local targets
+  targets=$(ms_vuln_targets)
+  assert_eq 1 "$(printf '%s\n' "$targets" | grep -cx "$HOME/.nvm/versions/node")" "nvm listings"
+  assert_eq 1 "$(printf '%s\n' "$targets" | grep -cx "$HOME/src")" "src listings"
+}
+
+test_vulns_timeout_leaves_no_work_directory() {
+  vulns_setup
+  stub syft 'sleep 30'
+  export MS_MODULE_LIMIT=2 TMPDIR="$TMP/tmp"
+  mkdir -p "$TMPDIR"
+  run_daily vulns
+  assert_eq failed "$(result_of vulns)"
+  assert_eq "" "$(find "$TMPDIR" -name 'mac-secure-vulns.*')" "work directories left"
 }
 
 test_vulns_scan_paths_setting_adds_locations() {
@@ -679,7 +794,7 @@ test_audit_vulns_groups_by_location_and_raises_known_exploited() {
   assert_contains "$out" "mac-secure vulns ~/.nvm/versions/node lists each one"
   assert_contains "$out" "$(printf 'high\tmalware-package\tevil-dep 1.0.1 at ~/.nvm/versions/node/v18.0.0/lib/node_modules/x/node_modules/evil-dep/package.json matches malware advisory GHSA-mmmm-0000-0003.')"
   assert_contains "$out" "$(printf 'medium\tvulnerable-software\t/Applications: 1 critical or high vulnerability in 1 package. Most affected: Old.app (1).')"
-  assert_contains "$out" "$(printf 'info\tlower-vulnerabilities\t1 medium or low vulnerability in 1 location.')"
+  assert_contains "$out" "$(printf 'info\tlower-vulnerabilities\t1 medium, low or unscored vulnerability in 1 location.')"
   assert_not_contains "$out" "vuln-scan"
 }
 
@@ -702,7 +817,7 @@ test_vulns_ignore_file_hides_reviewed_matches() {
     "$NVM|Critical|GHSA-mmmm-0000-0003|-|malware|not-fixed||npm|evil-dep|1.0.1|$HOME/other/node_modules/evil-dep/package.json" \
     "$NVM|High|CVE-2099-0004|-|-|fixed|2.0.0|npm|b|1.0.0|$NVM/v18.0.0/lib/node_modules/b/package.json"
   mkdir -p "$HOME/.config/mac-secure"
-  printf '# reviewed\nGHSA-mmmm-0000-0003 | .nvm/versions | same name as our internal package\nCVE-2099-0004\n' >"$HOME/.config/mac-secure/vulns-ignore.txt"
+  printf '# reviewed\nGHSA-mmmm-0000-0003 | ~/.nvm/versions | same name as our internal package\nCVE-2099-0004\n' >"$HOME/.config/mac-secure/vulns-ignore.txt"
   local out
   out=$(mac_secure vulns)
   # The listing shows the home folder as a tilde.
@@ -730,6 +845,12 @@ test_vulns_command_refuses_without_results_and_prints_valid_json() {
   out=$(mac_secure vulns /Applications)
   assert_contains "$out" 'CVE-2099-0200'
   assert_not_contains "$out" 'CVE-2099-0001'
+  vulns_results 0 \
+    "homebrew|High|CVE-2099-0100|-|-|fixed|1.0.1|brew|exampled|1.0.0|/opt/homebrew/opt/exampled" \
+    "/opt/homebrew/lib|High|CVE-2099-0300|-|-|fixed|2.0|python|tornado|1.0|/opt/homebrew/lib/python3.9/site-packages/tornado-1.0.dist-info/METADATA"
+  out=$(mac_secure vulns homebrew)
+  assert_contains "$out" 'CVE-2099-0100'
+  assert_not_contains "$out" 'CVE-2099-0300'
 }
 
 test_notification_is_bounded() {

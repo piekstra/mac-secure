@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # The module registry. Fields: id|scope|tool|recommended|summary|disruption
-# Order is run order. A tool of "-" means no external tool is needed.
+# Order is run order. A tool of "-" means no external tool is needed; "a+b" means it needs both.
 
 ms_modules() {
   cat <<'EOF'
@@ -17,7 +17,7 @@ uv|user|uv|yes|Upgrade Pythons managed by uv|None.
 playwright|user|-|yes|Keep the Playwright copies you already use, and their browsers, current|Removes cached npx copies that no running process uses.
 claude-code|user|claude|yes|Update Claude Code|None.
 colima|user|colima|no|Patch Ubuntu and Docker in running Colima VMs|Restarts Docker and VMs. Waits while a CI job is running.
-vulns|user|grype|yes|Scan installed tools, packages, editor extensions and apps for known vulnerabilities and malware, and notify about new ones|None. Its vulnerability database takes about 3 GB of disk, and each daily update downloads about 200 MB.
+vulns|user|grype+syft|yes|Scan installed tools, packages, editor extensions and apps for known vulnerabilities and malware, and notify about new ones|None. Its vulnerability database takes about 3 GB of disk, and each daily update downloads about 200 MB.
 browsers|user|-|yes|Restart browsers that still run old code after an update|Closes the browser 30 minutes after a warning. Stops stale automation profiles without a restart.
 macos|root|-|yes|Keep macOS auto-update settings on, install updates that need no restart, download the rest|Safari closes when it updates. macOS's own automatic install can restart the Mac overnight.
 macos-unattended|root|-|no|Install restart-required macOS updates by itself at the scheduled hour|Creates a hidden admin account with a stored random password. Restarts the Mac after a 5-minute warning.
@@ -60,10 +60,18 @@ EOF
 
 ms_module_exists() { [ -n "$(ms_module_field "$1" 1)" ]; }
 
-ms_module_available() {
+# Prints the first tool the module needs that is not installed.
+ms_module_missing_tool() {
   local tool
   tool=$(ms_module_field "$1" 3)
-  [ "$tool" = "-" ] || command -v "$tool" >/dev/null 2>&1
+  [ "$tool" != "-" ] || return 0
+  for tool in $(echo "$tool" | tr '+' ' '); do
+    command -v "$tool" >/dev/null 2>&1 || { echo "$tool"; return 0; }
+  done
+}
+
+ms_module_available() {
+  [ -z "$(ms_module_missing_tool "$1")" ]
 }
 
 ms_recommended_ids() {
