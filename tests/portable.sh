@@ -422,10 +422,14 @@ test_npm_failed_check_is_deferred_not_ok() {
 nvm_setup() {
   local bin="$HOME/.nvm/versions/node/v20.0.0/bin"
   mkdir -p "$bin"
+  # NVM_NPM_FAILS and NVM_OUTDATED_FAILS make install-latest-npm or the outdated check fail.
   cat >"$HOME/.nvm/nvm.sh" <<'EOF'
 nvm() {
   printf 'nvm %s\n' "$*" >>"$CALLS"
-  case "$1" in version) echo v20.0.0 ;; esac
+  case "$1" in
+    version) echo v20.0.0 ;;
+    install-latest-npm) [ -z "${NVM_NPM_FAILS:-}" ] ;;
+  esac
 }
 EOF
   cat >"$bin/npm" <<'EOF'
@@ -433,6 +437,7 @@ EOF
 printf 'nvm-npm %s\n' "$*" >>"$CALLS"
 case "$1" in
   outdated)
+    [ -z "${NVM_OUTDATED_FAILS:-}" ] || exit 1
     echo "/n/lib/node_modules/npm:npm@11.0.0:npm@10.0.0:npm@11.0.0:global"
     echo "/n/lib/node_modules/ccusage:ccusage@2.0.0:ccusage@1.0.0:ccusage@2.0.0:global"
     exit 1 ;;
@@ -459,6 +464,38 @@ test_npm_runs_for_nvm_without_npm_on_path() {
   run_daily npm
   assert_eq ok "$(result_of npm)"
   assert_called 'nvm-npm install -g ccusage@latest'
+}
+
+test_npm_failed_nvm_npm_update_fails_the_module() {
+  nvm_setup
+  export NVM_NPM_FAILS=1
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: npm(v20.0.0)"
+}
+
+test_npm_failed_nvm_check_is_deferred_and_named() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_OUTDATED_FAILS=1
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "could not check for updates: nvm v20.0.0"
+}
+
+test_npm_covers_nvm_default_once_when_it_is_first_on_path() {
+  nvm_setup
+  rm "$STUBS/npm"
+  # As EXTRA_PATH would put it, ahead of the standard directories.
+  export MS_JOB_PATH="$HOME/.nvm/versions/node/v20.0.0/bin:$MS_JOB_PATH"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_not_called 'nvm-npm install -g npm@latest'
+  assert_eq 1 "$(grep -c 'nvm-npm install -g ccusage@latest' "$CALLS")" "ccusage installs"
+}
+
+test_sandbox_hides_the_real_nvm() {
+  [ -z "${NVM_DIR:-}" ] || fail "NVM_DIR is set in the sandbox: $NVM_DIR"
 }
 
 test_npm_is_not_in_use_without_npm_or_nvm() {

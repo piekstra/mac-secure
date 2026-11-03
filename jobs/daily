@@ -203,7 +203,7 @@ ch_brew_casks() {
 }
 
 # Upgrades the outdated global packages of the npm first on PATH, except the one named in $1, adding
-# to NPM_COUNT and NPM_FAILED. Returns 75 when the check itself failed.
+# to the caller's NPM_COUNT and NPM_FAILED. Returns 75 when the check itself failed.
 upgrade_npm_globals() {
   local skip=${1:-} pkg pkgs listing rc
   # Exit 1 means packages are outdated, and also that the check failed. Only the former lists any.
@@ -219,44 +219,43 @@ upgrade_npm_globals() {
 }
 
 # Prints the version nvm's default alias resolves to, such as v20.19.4.
+# Usage: nvm_default_version <nvm dir>
 nvm_default_version() {
-  local dir=${NVM_DIR:-$HOME/.nvm}
-  [ -s "$dir/nvm.sh" ] || return 1
+  [ -s "$1/nvm.sh" ] || return 1
   # shellcheck disable=SC1091
-  ( . "$dir/nvm.sh" --no-use >/dev/null 2>&1; nvm version default 2>/dev/null )
+  ( . "$1/nvm.sh" --no-use >/dev/null 2>&1; nvm version default 2>/dev/null )
 }
 
 # nvm's Nodes are outside the job's PATH, so its default Node gets its own pass. Only the default:
 # projects pin the others, and a package's newest version may not run on them. npm itself is left to
 # nvm, whose install-latest-npm picks the newest npm that runs on that Node.
 ch_npm() {
-  local version dir rc=0 used=0 nvm_note=""
-  NPM_COUNT=0 NPM_FAILED=""
-  if command -v npm >/dev/null 2>&1; then
-    used=1
-    upgrade_npm_globals || rc=75
-  fi
-  version=$(nvm_default_version)
-  dir=${NVM_DIR:-$HOME/.nvm}
+  local dir=${NVM_DIR:-$HOME/.nvm} version nvm_bin="" used=0 nvm_note="" unchecked=""
+  local NPM_COUNT=0 NPM_FAILED=""
+  version=$(nvm_default_version "$dir")
   case "$version" in
-    v[0-9]*)
-      if [ -x "$dir/versions/node/$version/bin/npm" ]; then
-        used=1
-        nvm_note="; nvm default $version"
-        PATH="$dir/versions/node/$version/bin:$PATH" upgrade_npm_globals npm || rc=75
-        # shellcheck disable=SC1091
-        ( . "$dir/nvm.sh" --no-use && nvm use --silent "$version" && nvm install-latest-npm ) || NPM_FAILED="$NPM_FAILED npm($version)"
-      fi
-      ;;
+    v[0-9]*) [ ! -x "$dir/versions/node/$version/bin/npm" ] || nvm_bin="$dir/versions/node/$version/bin" ;;
   esac
+  # When EXTRA_PATH puts nvm's default Node first, its own pass below covers it.
+  if command -v npm >/dev/null 2>&1 && [ "$(command -v npm)" != "$nvm_bin/npm" ]; then
+    used=1
+    upgrade_npm_globals || unchecked="$unchecked $(command -v npm)"
+  fi
+  if [ -n "$nvm_bin" ]; then
+    used=1
+    nvm_note="; nvm default $version"
+    PATH="$nvm_bin:$PATH" upgrade_npm_globals npm || unchecked="$unchecked nvm $version"
+    # shellcheck disable=SC1091
+    ( . "$dir/nvm.sh" --no-use && nvm use --silent "$version" && nvm install-latest-npm ) || NPM_FAILED="$NPM_FAILED npm($version)"
+  fi
   if [ "$used" -eq 0 ]; then
     detail "not in use"
     return 0
   fi
-  [ "$rc" -ne 75 ] || nvm_note="$nvm_note; could not check for updates"
-  detail "updated $NPM_COUNT$nvm_note; failed:${NPM_FAILED:- none}"
+  detail "updated $NPM_COUNT$nvm_note; ${unchecked:+could not check for updates:$unchecked; }failed:${NPM_FAILED:- none}"
   [ -z "$NPM_FAILED" ] || return 1
-  return "$rc"
+  [ -z "$unchecked" ] || return 75
+  return 0
 }
 
 ch_rust() {
