@@ -12,6 +12,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/lib/common.sh"
 # shellcheck source=lib/modules.sh
 . "$ROOT/lib/modules.sh"
+# shellcheck source=lib/vulns.sh
+. "$ROOT/lib/vulns.sh"
 
 PATH=$(ms_tool_path)
 export PATH
@@ -469,6 +471,122 @@ for line in sys.stdin:
   detail "patched:${done_list:- none}; docker:${versions:- none}; deferred:${deferred:- none}; failed:${failed:- none}"
   [ -n "$failed" ] && return 1
   [ -n "$deferred" ] && return 75
+  return 0
+}
+
+# The fields kept from each grype match, one line per place the package was found: the layout of
+# lib/vulns.sh without the location, and with the path relative to the scanned directory.
+vuln_template() {
+  printf '%s\t' '{{- range $m := .Matches}}{{range $l := $m.Artifact.Locations}}{{$m.Vulnerability.Severity}}' \
+    '{{$m.Vulnerability.ID}}' '{{if $m.Vulnerability.KnownExploited}}kev{{else}}-{{end}}' \
+    '{{if hasPrefix "Malware in" $m.Vulnerability.Description}}malware{{else}}-{{end}}' \
+    '{{$m.Vulnerability.Fix.State}}' '{{join "," $m.Vulnerability.Fix.Versions}}' \
+    '{{$m.Artifact.Type}}' '{{$m.Artifact.Name}}' '{{$m.Artifact.Version}}'
+  printf '%s\n%s\n' '{{$l.RealPath}}' '{{end}}{{end}}'
+}
+
+# Prints the target's matches in the results layout. Prints nothing unless both tools succeed.
+scan_vuln_target() {
+  local target=$1 work=$2
+  # syft's installed-package catalogers, rather than the directory default, so packages installed
+  # without a lockfile (npm globals among them) are seen and a lockfile's unused entries are not.
+  syft scan "dir:$target" --override-default-catalogers image -o "syft-json=$work/sbom.json" -q || return 1
+  grype "sbom:$work/sbom.json" -o template -t "$work/vulns.tmpl" -q >"$work/matches.txt" || return 1
+  # npm installs a package at node_modules/<name>/package.json. Any other package.json is a project's,
+  # an editor extension's or a bundled subfolder's own manifest, and malware advisories often take
+  # those names, so matching one would be a false alarm.
+  awk -F'\t' -v OFS='\t' -v t="$target" '
+    NF < 10 { next }
+    $7 == "npm" && $10 !~ /\/node_modules\/(@[^\/]+\/)?[^\/]+\/package\.json$/ { next }
+    { print t, $1, $2, $3, $4, $5, $6, $7, $8, $9, t $10 }
+  ' "$work/matches.txt"
+}
+
+# brew vulns exits 1 for a finding and for an error alike, so the report decides. Homebrew needs the
+# Command Line Tools, so this python3 is never the shim that asks to install them.
+scan_vuln_homebrew() {
+  local work=$1 prefix
+  prefix=$(brew --prefix) || return 1
+  brew vulns --json >"$work/brew.json" 2>"$work/brew.err"
+  /usr/bin/python3 -I -c '
+import json, sys
+try:
+    report = json.load(open(sys.argv[1]))
+    findings = report["findings"]
+except (ValueError, KeyError, OSError):
+    sys.exit(3)
+names = {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium", "MODERATE": "Medium", "LOW": "Low"}
+lines = []
+for found in findings:
+    path = "%s/opt/%s" % (sys.argv[2], found["formula"])
+    for vuln in found.get("vulnerabilities", []):
+        fixed = vuln.get("fixed_versions") or []
+        lines.append("\t".join(["homebrew", names.get(str(vuln.get("severity")).upper(), "Unknown"), vuln["id"], "-", "-",
+                                "fixed" if fixed else "not-fixed", ",".join(fixed), "brew", found["formula"],
+                                str(found.get("version", "")), path]))
+checked = report.get("checked", 0)
+with open(sys.argv[3], "w") as out:
+    out.write("homebrew: %s formulae checked, %d skipped for lack of a supported source URL\n"
+              % (len(checked) if isinstance(checked, list) else checked, len(report.get("skipped_formulae", []))))
+print("\n".join(lines))
+' "$work/brew.json" "$prefix" "$work/coverage.txt" | grep .
+  [ "${PIPESTATUS[0]}" -eq 0 ]
+}
+
+ch_vulns() {
+  command -v syft >/dev/null 2>&1 || { detail "syft is not installed: brew install syft"; return 1; }
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  local work target scanned=0 failed="" before after new counts coverage
+  export GRYPE_CHECK_FOR_APP_UPDATE=false SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_DB_AUTO_UPDATE=false
+  # On a failed update grype keeps the database it has, and refuses to scan once that is too old.
+  grype db update || echo "grype db update failed; scanning with the database already here"
+  work=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-vulns.XXXXXX")
+  mkdir -p "$MS_VULN_DIR"
+  vuln_template >"$work/vulns.tmpl"
+  : >"$work/latest.tsv"
+  : >"$work/coverage.txt"
+  # A location that could not be scanned keeps its previous results, so a failed scan never reads as clean.
+  while IFS= read -r target; do
+    [ -d "$target" ] || continue
+    if scan_vuln_target "$target" "$work" >>"$work/latest.tsv"; then
+      scanned=$((scanned + 1))
+    else
+      failed="$failed $target"
+      awk -F'\t' -v t="$target" '$1 == t' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+    fi
+  done <<EOF
+$(ms_vuln_targets)
+EOF
+  if command -v brew >/dev/null 2>&1; then
+    if scan_vuln_homebrew "$work" >>"$work/latest.tsv"; then
+      scanned=$((scanned + 1))
+    else
+      failed="$failed homebrew"
+      awk -F'\t' '$1 == "homebrew"' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+    fi
+  fi
+  before=$(ms_vuln_urgent_keys)
+  mv -f "$work/latest.tsv" "$MS_VULN_RESULTS"
+  mv -f "$work/coverage.txt" "$MS_VULN_COVERAGE"
+  # The stamp marks the last complete scan, so repeated partial failures surface as a stale scan.
+  [ -n "$failed" ] || date +%s >"$MS_VULN_STAMP"
+  after=$(ms_vuln_urgent_keys)
+  new=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c .)
+  if [ "$new" -gt 0 ]; then
+    ms_notify "mac-secure: new vulnerabilities" "$new new critical, known-exploited or malware findings. Run: mac-secure audit"
+  fi
+  # Each vulnerability counts once per package version, however many copies are installed.
+  counts=$(ms_vulns_effective | awk -F'\t' '
+    ($3, $9, $10) in seen { next }
+    { seen[$3, $9, $10] = 1 }
+    $2 == "Critical" || $2 == "High" { severe++ }
+    $4 == "kev" { kev++ }
+    $5 == "malware" { malware++ }
+    END { printf "%d critical or high, %d known exploited, %d malware", severe, kev, malware }')
+  coverage=$(tr '\n' ' ' <"$MS_VULN_COVERAGE" | sed 's/ *$//')
+  detail "scanned $scanned locations: $counts; ${coverage:+$coverage; }failed:${failed:- none}"
+  rm -rf "$work"
+  [ -z "$failed" ] || return 75
   return 0
 }
 

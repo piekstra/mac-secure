@@ -27,3 +27,6 @@
 # The Python whose Playwright package is kept current, and the browsers to install.
 #PLAYWRIGHT_PYTHON=python3
 #PLAYWRIGHT_BROWSERS=chromium
+
+# More directories for the vulns module to scan, separated by colons. ~/ is your home folder.
+#VULN_SCAN_PATHS=~/src
