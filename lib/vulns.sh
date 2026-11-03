@@ -13,6 +13,7 @@ MS_VULN_STAMP="$MS_VULN_DIR/scanned-at"
 MS_VULN_COVERAGE="$MS_VULN_DIR/coverage.txt"
 MS_VULN_GAPS="$MS_VULN_DIR/gaps.tsv"
 MS_VULN_IGNORE="$MS_CONFIG_DIR/vulns-ignore.txt"
+MS_VULN_FIRST_SEEN="$MS_VULN_DIR/first-seen.tsv"
 MS_VULN_STALE_DAYS=3
 
 # Where tools, runtimes, editor extensions and apps get installed. The scan reads what is installed
@@ -90,6 +91,19 @@ ms_vulns_effective() {
 ms_vuln_urgent_keys() {
   ms_vulns_effective 2>/dev/null |
     awk -F'\t' '$2 == "Critical" || $4 == "kev" || $5 == "malware" { print $1 "|" $3 "|" $9 "|" $10 }' | sort -u
+}
+
+# Records when each critical, known-exploited or malware match was first found, as
+# "<key>\t<epoch>", so `notices` can tell new ones from old. A match that went away is dropped.
+ms_vuln_record_first_seen() {
+  local now
+  now=$(date +%s)
+  ms_vuln_urgent_keys | awk -F'\t' -v OFS='\t' -v now="$now" '
+    FILENAME == ARGV[1] { first[$1] = $2; next }
+    $0 != "" { print $0, ($0 in first) ? first[$0] : now }
+  ' "${MS_VULN_FIRST_SEEN}" - 2>/dev/null >"$MS_VULN_FIRST_SEEN.new" ||
+    ms_vuln_urgent_keys | awk -v OFS='\t' -v now="$now" '$0 != "" { print $0, now }' >"$MS_VULN_FIRST_SEEN.new"
+  mv -f "$MS_VULN_FIRST_SEEN.new" "$MS_VULN_FIRST_SEEN"
 }
 
 ms_vuln_scan_age_days() {

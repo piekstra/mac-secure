@@ -25,6 +25,7 @@ mac-secure enable --recommended
 | `status [--json]` | Security settings, jobs, each module's last result. Read-only. |
 | `audit [--json]` | Findings about this Mac, most severe first. Read-only. |
 | `modules [--json]` | Every module, what it does and what it can disrupt. Read-only. |
+| `notices [--json]` | What needs attention now: packages matching a malware advisory, known-exploited vulnerabilities first found in the last `NOTICE_DAYS` days (7 by default), failed update runs, and a stale scan. Prints nothing when nothing does. Read-only and fast. |
 | `vulns [filter] [--all] [--json]` | Each known vulnerability from the last scan: critical, high and malware, or every severity with `--all`. The filter matches a location, path or package. Read-only. |
 | `logs [daily\|enforcer\|root] [-n <lines>]` | The newest log. Read-only. |
 | `enable <module>... \| --recommended [--yes]` | Turns modules on and installs their jobs. |
@@ -144,7 +145,9 @@ The repository ships a Claude Code plugin with a skill that teaches an agent how
 /plugin install mac-secure@mac-secure
 ```
 
-Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes to this repository.
+The plugin also has a hook that runs `mac-secure notices` when a Claude Code session starts, so the agent begins the session knowing about malware matches, newly found known-exploited vulnerabilities, failed update runs, or a stale scan. It prints nothing when nothing needs attention or `mac-secure` is not installed.
+
+Other agents can read `skills/mac-secure/SKILL.md`, and `AGENTS.md` for changes to this repository. A script or another agent's start-up step can run `mac-secure notices` the same way.
 
 ## Develop
 

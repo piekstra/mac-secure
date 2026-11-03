@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 PREFIX ?= $(HOME)/.local
-SCRIPTS := bin/mac-secure jobs/daily jobs/enforcer root/macos-update root/install-root.sh lib/*.sh tests/*.sh
+SCRIPTS := bin/mac-secure jobs/daily jobs/enforcer root/macos-update root/install-root.sh lib/*.sh tests/*.sh hooks/session-start
 
 .PHONY: verify lint test install uninstall
 

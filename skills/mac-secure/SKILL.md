@@ -16,12 +16,15 @@ mac-secure status --json    # settings, jobs, each module's last result
 mac-secure audit --json     # findings, most severe first: severity, id, finding, action
 mac-secure modules --json   # every module: scope, recommended, enabled, available, summary, disruption
 mac-secure vulns --json     # each critical, high or malware match from the last scan; --all for every severity
+mac-secure notices          # what needs attention now; nothing when nothing does
 mac-secure logs daily -n 100   # also: enforcer, root
 ```
 
 Report findings with their `action`. For `stale-playwright-browser`, the action names the Playwright copies that keep the old build. Some are cached libraries that a program downloads again when it runs, so ask before removing any. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
 
 ## Vulnerability findings
+
+A session can start with lines beginning `mac-secure:`, from the plugin's start-up hook. Tell the user about them before other work when one names a malware match, and otherwise when the work at hand allows.
 
 `audit` gives one `vulnerable-software` finding per location, one `malware-package` finding per malware match, one `lower-vulnerabilities` count, and a `vuln-coverage-gap` for each kind of thing the scan could not check. `mac-secure vulns <location or package> --json` lists the matches behind a finding, each with `fixed_in`, `known_exploited` and `path`.
 

@@ -39,6 +39,9 @@ Read-only, never prompts:
   mac-secure status [--json]          Security settings, jobs, and each module's last result
   mac-secure audit [--json]           Findings about this Mac, most severe first
   mac-secure modules [--json]         Every module, what it does, what it can disrupt
+  mac-secure notices [--json]         What needs attention now: malware, newly found known-exploited
+                                      vulnerabilities, failed jobs, a stale scan. Prints nothing
+                                      when nothing does. Reads files only, so it is fast.
   mac-secure vulns [filter] [--all] [--json]
                                       Known vulnerabilities from the last scan: critical, high and
                                       malware, or every severity with --all. The filter matches a
@@ -412,6 +415,62 @@ cmd_vulns() {
   '
 }
 
+# Read-only and fast, since an agent's session start waits for it: it reads files and runs no scan.
+cmd_notices() {
+  local json=0 days notices="" age malware new failed file
+  [ "${1:-}" != --json ] || json=1
+  days=$(ms_config_int NOTICE_DAYS 7)
+  # With the vulns module off, its results are not refreshed, so they are not offered as current.
+  ms_user_enabled vulns || MS_VULN_RESULTS=/nonexistent
+  malware=$(ms_vulns_effective 2>/dev/null | awk -F'\t' -v home="$HOME" '
+    function show(p) { return index(p, home "/") == 1 ? "~" substr(p, length(home) + 1) : p }
+    $5 == "malware" && !(($9, $10, $11) in seen) { seen[$9, $10, $11] = 1; n++; if (n <= 3) list = list (n > 1 ? "; " : "") $9 " " $10 " at " show($11) }
+    END { if (n) printf "%d %s matching a malware advisory: %s%s.", n, (n == 1 ? "package" : "packages"), list, (n > 3 ? "; ..." : "") }')
+  [ -z "$malware" ] || notices="$notices$malware
+"
+  new=$(ms_vulns_effective 2>/dev/null | awk -F'\t' -v home="$HOME" -v since=$(($(date +%s) - days * 86400)) -v days="$days" '
+    function show(p) { return index(p, home "/") == 1 ? "~" substr(p, length(home) + 1) : p }
+    FILENAME == ARGV[1] { first[$1] = $2; next }
+    $4 == "kev" {
+      key = $1 "|" $3 "|" $9 "|" $10
+      if ((key in first) && first[key] + 0 >= since && !(key in seen)) {
+        seen[key] = 1; n++
+        if (!($1 in where)) { where[$1] = 1; places = places (places == "" ? "" : ", ") ($1 == "homebrew" ? "Homebrew formulae" : show($1)) }
+      }
+    }
+    END { if (n) printf "%d known-exploited %s first found in the last %d days, in %s.", n, (n == 1 ? "vulnerability" : "vulnerabilities"), days, places }
+  ' "$MS_VULN_FIRST_SEEN" - 2>/dev/null)
+  [ -z "$new" ] || notices="$notices$new
+"
+  failed=$(for file in "$MS_STATE_DIR/last-run.tsv" "$MS_ROOT_RESULTS"; do [ ! -r "$file" ] || cat "$file"; done |
+    awk -F'\t' '$3 == "failed" { printf "%s%s", (n++ ? ", " : ""), $2 }')
+  [ -z "$failed" ] || notices="${notices}The last update run failed for: $failed. See: mac-secure logs.
+"
+  if ms_user_enabled vulns; then
+    if [ ! -f "$MS_VULN_RESULTS" ]; then
+      notices="${notices}The vulns module is on, but no vulnerability scan has finished.
+"
+    elif ! age=$(ms_vuln_scan_age_days); then
+      notices="${notices}No vulnerability scan has finished every location.
+"
+    elif [ "$age" -gt "$MS_VULN_STALE_DAYS" ]; then
+      notices="${notices}The last complete vulnerability scan is $age days old.
+"
+    fi
+  fi
+  if [ "$json" -eq 1 ]; then
+    printf '%s' "$notices" | awk '
+      function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+      BEGIN { printf "[" }
+      NF { printf "%s%s", (n++ ? "," : ""), q($0) }
+      END { print "]" }'
+    return
+  fi
+  [ -n "$notices" ] || return 0
+  printf 'mac-secure: %s' "$notices" | sed '2,$s/^/mac-secure: /'
+  echo "Details: mac-secure audit --json, and mac-secure vulns --json for each vulnerability."
+}
+
 cmd_status() {
   require_macos
   if [ "${1:-}" = --json ]; then
@@ -440,6 +499,7 @@ case "$command" in
   audit) cmd_audit "$@" ;;
   modules) cmd_modules "$@" ;;
   vulns) cmd_vulns "$@" ;;
+  notices) cmd_notices "$@" ;;
   enable) cmd_enable "$@" ;;
   disable) cmd_disable "$@" ;;
   run) cmd_run "$@" ;;

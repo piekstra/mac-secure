@@ -621,6 +621,7 @@ EOF
   # The stamp marks the last complete scan, so repeated partial failures surface as a stale scan.
   [ -n "$failed" ] || date +%s >"$MS_VULN_STAMP"
   after=$(ms_vuln_urgent_keys)
+  ms_vuln_record_first_seen
   new=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c .)
   if [ "$new" -gt 0 ]; then
     ms_notify "mac-secure: new vulnerabilities" "$new new critical, known-exploited or malware findings. Run: mac-secure audit"

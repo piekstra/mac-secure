@@ -28,6 +28,9 @@
 #PLAYWRIGHT_PYTHON=python3
 #PLAYWRIGHT_BROWSERS=chromium
 
+# How many days `mac-secure notices` keeps calling a known-exploited vulnerability new.
+#NOTICE_DAYS=7
+
 # More directories for the vulns module to scan, separated by colons. ~/ is your home folder.
 #VULN_SCAN_PATHS=~/src
 
