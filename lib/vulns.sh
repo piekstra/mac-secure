@@ -12,6 +12,7 @@ MS_VULN_RESULTS="$MS_VULN_DIR/latest.tsv"
 MS_VULN_STAMP="$MS_VULN_DIR/scanned-at"
 MS_VULN_COVERAGE="$MS_VULN_DIR/coverage.txt"
 MS_VULN_GAPS="$MS_VULN_DIR/gaps.tsv"
+MS_VULN_LOCATION_GAPS="$MS_VULN_DIR/gaps-locations.tsv"
 MS_VULN_IGNORE="$MS_CONFIG_DIR/vulns-ignore.txt"
 MS_VULN_STALE_DAYS=3
 
