@@ -7,7 +7,7 @@ ms_modules() {
 brew-formulae|user|brew|yes|Upgrade every Homebrew formula|Running services keep old code until they restart.
 adopt-apps|user|brew|no|Move the apps listed in adopt-apps.txt under Homebrew, so they update while closed|Replaces each app and closes it if running.
 brew-casks|user|brew|yes|Upgrade every cask, including apps that claim to update themselves|Closes an app being upgraded, then reopens it.
-npm|user|-|yes|Upgrade global npm packages to latest, in the Node on PATH and nvm's default Node|A new major version can change how a CLI behaves.
+npm|user|-|yes|Upgrade global npm packages to latest, in the Node on PATH and nvm's default Node|A new major version can change how a CLI behaves. On nvm's default Node, a release that declares it needs a newer Node is held back.
 rust|user|rustup|yes|Update Rust toolchains and rustup|None.
 cargo|user|cargo|yes|Reinstall crates installed from crates.io|Compiles from source; can take many minutes.
 cargo-local|user|cargo-audit|no|Rebuild local-source Rust CLIs whose lockfile has a RustSec advisory|Replaces the installed binary with a build of the default branch.

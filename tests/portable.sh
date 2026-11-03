@@ -418,32 +418,43 @@ test_npm_failed_check_is_deferred_not_ok() {
   assert_contains "$(detail_of npm)" "could not check"
 }
 
-# An nvm whose default alias resolves to v20.0.0, whose npm reports itself and ccusage outdated.
+# An nvm in <folder> (default ~/.nvm) whose default alias resolves to v20.0.0, whose npm reports
+# itself, ccusage and newer-node-only outdated. Flags: NVM_DEFAULT replaces the resolved version;
+# NVM_NPM_FAILS fails install-latest-npm; NVM_NPM_BREAKS makes it leave an npm that does not run;
+# NVM_OUTDATED_FAILS fails the outdated check.
+# Usage: nvm_setup [folder]
 nvm_setup() {
-  local bin="$HOME/.nvm/versions/node/v20.0.0/bin"
-  mkdir -p "$bin"
-  # NVM_NPM_FAILS and NVM_OUTDATED_FAILS make install-latest-npm or the outdated check fail.
-  cat >"$HOME/.nvm/nvm.sh" <<'EOF'
+  local dir=${1:-$HOME/.nvm}
+  local root="$dir/versions/node/v20.0.0"
+  mkdir -p "$root/bin" "$root/lib/node_modules/npm" "$dir/alias"
+  echo 20 >"$dir/alias/default"
+  cat >"$dir/nvm.sh" <<'EOF'
 nvm() {
   printf 'nvm %s\n' "$*" >>"$CALLS"
   case "$1" in
-    version) echo v20.0.0 ;;
-    install-latest-npm) [ -z "${NVM_NPM_FAILS:-}" ] ;;
+    version) echo "${NVM_DEFAULT:-v20.0.0}" ;;
+    install-latest-npm)
+      [ -z "${NVM_NPM_FAILS:-}" ] || return 1
+      [ -z "${NVM_NPM_BREAKS:-}" ] || touch "$NVM_DIR/versions/node/v20.0.0/lib/node_modules/npm/broken" ;;
   esac
 }
 EOF
-  cat >"$bin/npm" <<'EOF'
+  cat >"$root/bin/npm" <<'EOF'
 #!/bin/bash
-printf 'nvm-npm %s\n' "$*" >>"$CALLS"
+printf 'nvm-npm %s engine_strict=%s\n' "$*" "${npm_config_engine_strict:-}" >>"$CALLS"
 case "$1" in
+  --version) [ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0 ;;
   outdated)
     [ -z "${NVM_OUTDATED_FAILS:-}" ] || exit 1
     echo "/n/lib/node_modules/npm:npm@11.0.0:npm@10.0.0:npm@11.0.0:global"
     echo "/n/lib/node_modules/ccusage:ccusage@2.0.0:ccusage@1.0.0:ccusage@2.0.0:global"
+    echo "/n/lib/node_modules/newnode:newnode@9.0.0:newnode@8.0.0:newnode@9.0.0:global"
     exit 1 ;;
+  install)
+    case "$3" in newnode@latest) echo "npm ERR! code EBADENGINE"; exit 1 ;; esac ;;
 esac
 EOF
-  chmod +x "$bin/npm"
+  chmod +x "$root/bin/npm"
 }
 
 test_npm_updates_nvm_default_node_and_leaves_npm_to_nvm() {
@@ -455,7 +466,51 @@ test_npm_updates_nvm_default_node_and_leaves_npm_to_nvm() {
   assert_not_called 'nvm-npm install -g npm@latest'
   assert_called 'nvm use --silent v20.0.0'
   assert_called 'nvm install-latest-npm'
-  assert_contains "$(detail_of npm)" "updated 1; nvm default v20.0.0"
+  assert_contains "$(detail_of npm)" "updated 1; nvm default v20.0.0; held back for that Node: newnode; failed: none"
+  assert_called 'nvm-npm install -g ccusage@latest engine_strict=true'
+}
+
+test_npm_puts_back_an_npm_that_does_not_run_after_nvm_updates_it() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_NPM_BREAKS=1 TMPDIR="$TMP/tmp"
+  mkdir -p "$TMPDIR"
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: npm(v20.0.0)"
+  [ ! -e "$HOME/.nvm/versions/node/v20.0.0/lib/node_modules/npm/broken" ] || fail "the npm that does not run was left in place"
+  assert_eq "" "$(find "$TMPDIR" -maxdepth 1 -name 'mac-secure-npm.*' 2>/dev/null)" "backup left behind"
+}
+
+test_npm_nvm_without_a_default_alias_is_named_and_clean() {
+  nvm_setup
+  stub npm 'exit 0'
+  rm "$HOME/.nvm/alias/default"
+  export NVM_DEFAULT=N/A
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "nvm has no default Node"
+}
+
+test_npm_nvm_default_that_does_not_resolve_is_deferred() {
+  nvm_setup
+  stub npm 'exit 0'
+  export NVM_DEFAULT=N/A
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "could not check: nvm default 20 does not resolve"
+}
+
+test_npm_finds_homebrew_nvm_and_a_configured_folder() {
+  nvm_setup "$HOME/nvm-data"
+  mkdir -p "$TMP/homebrew/opt/nvm" "$HOME/.config/mac-secure"
+  mv "$HOME/nvm-data/nvm.sh" "$TMP/homebrew/opt/nvm/nvm.sh"
+  stub brew "case \"\$1\" in --prefix) echo '$TMP/homebrew' ;; esac"
+  rm "$STUBS/npm"
+  echo "NVM_DIR=$HOME/nvm-data" >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
 }
 
 test_npm_runs_for_nvm_without_npm_on_path() {
@@ -480,7 +535,7 @@ test_npm_failed_nvm_check_is_deferred_and_named() {
   export NVM_OUTDATED_FAILS=1
   run_daily npm
   assert_eq deferred "$(result_of npm)"
-  assert_contains "$(detail_of npm)" "could not check for updates: nvm v20.0.0"
+  assert_contains "$(detail_of npm)" "could not check: nvm v20.0.0"
 }
 
 test_npm_covers_nvm_default_once_when_it_is_first_on_path() {

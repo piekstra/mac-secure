@@ -21,6 +21,9 @@
 # Directories to search for tools before the standard ones, separated by colons.
 #EXTRA_PATH=
 
+# nvm's folder, when it is not ~/.nvm. The daily job does not read your shell profile.
+#NVM_DIR=
+
 # Run on each binary cargo-local builds, before it replaces the installed one.
 #CARGO_LOCAL_SIGN_COMMAND=
 
