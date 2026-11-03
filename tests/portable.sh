@@ -1547,6 +1547,8 @@ test_root_job_records_results_for_status() {
   assert_contains "$results" "app-store	ok"
   assert_contains "$results" "vendor-installers	ok"
   assert_contains "$results" "macos	ok"
+  # status reads this as the user, and the job's umask would leave a new file root-only.
+  assert_eq "-rw-r--r--" "$(ls -l "$RESULTS" | cut -c1-10)" "results mode"
 }
 
 test_root_job_records_a_failed_vendor_and_a_failed_update() {
