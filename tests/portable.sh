@@ -418,6 +418,56 @@ test_npm_failed_check_is_deferred_not_ok() {
   assert_contains "$(detail_of npm)" "could not check"
 }
 
+# An nvm whose default alias resolves to v20.0.0, whose npm reports itself and ccusage outdated.
+nvm_setup() {
+  local bin="$HOME/.nvm/versions/node/v20.0.0/bin"
+  mkdir -p "$bin"
+  cat >"$HOME/.nvm/nvm.sh" <<'EOF'
+nvm() {
+  printf 'nvm %s\n' "$*" >>"$CALLS"
+  case "$1" in version) echo v20.0.0 ;; esac
+}
+EOF
+  cat >"$bin/npm" <<'EOF'
+#!/bin/bash
+printf 'nvm-npm %s\n' "$*" >>"$CALLS"
+case "$1" in
+  outdated)
+    echo "/n/lib/node_modules/npm:npm@11.0.0:npm@10.0.0:npm@11.0.0:global"
+    echo "/n/lib/node_modules/ccusage:ccusage@2.0.0:ccusage@1.0.0:ccusage@2.0.0:global"
+    exit 1 ;;
+esac
+EOF
+  chmod +x "$bin/npm"
+}
+
+test_npm_updates_nvm_default_node_and_leaves_npm_to_nvm() {
+  nvm_setup
+  stub npm 'exit 0'
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+  assert_not_called 'nvm-npm install -g npm@latest'
+  assert_called 'nvm use --silent v20.0.0'
+  assert_called 'nvm install-latest-npm'
+  assert_contains "$(detail_of npm)" "updated 1; nvm default v20.0.0"
+}
+
+test_npm_runs_for_nvm_without_npm_on_path() {
+  nvm_setup
+  rm "$STUBS/npm"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+}
+
+test_npm_is_not_in_use_without_npm_or_nvm() {
+  rm "$STUBS/npm"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_eq "not in use" "$(detail_of npm)"
+}
+
 test_npm_nothing_outdated_is_ok() {
   stub npm 'exit 0'
   run_daily npm
