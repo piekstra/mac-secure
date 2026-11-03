@@ -61,6 +61,8 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `firewall` | root | yes | Keeps the macOS firewall on | An unsigned program that listens beyond this Mac raises an allow dialog |
 | `vendor-installers` | root | no | Keeps the pkg-based apps in `vendor-installers.txt` current | An app can close when its installer runs |
 
+`audit` also reports a Playwright browser build older than the browser installed on the Mac, or than the newest build Playwright has there, with the copies of Playwright that keep it. It checks `~/Library/Caches/ms-playwright` and, when set in the environment of whoever runs `audit`, the folder `PLAYWRIGHT_BROWSERS_PATH` names. A copy under Desktop, Documents, Downloads, iCloud Drive or `/Volumes` is not read, since that can raise a privacy prompt, so the finding says which copies use such a build is unknown. Playwright [deletes a build](https://playwright.dev/docs/browsers#stale-browser-removal) once no installed copy needs it.
+
 A module whose tool is not installed is skipped until the tool appears, so enabling one you do not use costs nothing.
 
 ## What runs
@@ -158,6 +160,7 @@ Pull requests run on Linux only. The macOS job runs on `main` and on manual runs
 - On Intel, the test suite, `status`, and `audit` pass on a `macos-15-intel` CI runner. No vendor package has been installed on an Intel Mac.
 - Not verified: `RelaunchNotification` policy on Edge and Brave. It is the same Chromium policy as Chrome.
 - Without root, `audit` sees only the current user's listening processes.
+- With `PLAYWRIGHT_BROWSERS_PATH=0`, each copy of Playwright keeps its browsers in its own `node_modules`, which `audit` does not check.
 - `vulns` matches an app by the packages and binaries inside it. A vulnerability in an app's own code is reported only when the database names that app, so an app with no match is not proven clean.
 - `kMDItemLastUsedDate` is unreliable after an app is reinstalled, so `audit` makes no claim about when an app was last used.
 

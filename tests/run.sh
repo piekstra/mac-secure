@@ -30,6 +30,7 @@ sandbox() {
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-test.XXXXXX")
   export HOME="$TMP/home"
   mkdir -p "$HOME"
+  unset PLAYWRIGHT_BROWSERS_PATH
   STUBS="$TMP/stubs"
   mkdir -p "$STUBS"
   export CALLS="$TMP/calls"

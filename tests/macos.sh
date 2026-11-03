@@ -287,6 +287,119 @@ test_audit_skips_loopback_listeners() {
   assert_not_contains "$out" 'localsix accepts'
 }
 
+# Usage: fake_bundle <path to .app> <version>
+fake_bundle() {
+  mkdir -p "$1/Contents"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>%s</string></dict></plist>\n' "$2" >"$1/Contents/Info.plist"
+}
+
+playwright_cache_setup() {
+  CACHE=${1:-$HOME/Library/Caches/ms-playwright}
+  fake_bundle "$CACHE/chromium-1200/chrome-mac-arm64/Google Chrome for Testing.app" 143.0.7499.4
+  fake_bundle "$CACHE/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app" 156.0.8078.4
+  fake_bundle "$CACHE/firefox-1509/firefox/Nightly.app" 146.0.1
+  fake_bundle "$CACHE/firefox-1555/firefox/Nightly.app" 152.0
+  mkdir -p "$CACHE/.links" "$HOME/old copy/playwright-core"
+  cp "$FIXTURES/playwright-browsers.json" "$HOME/old copy/playwright-core/browsers.json"
+  echo "$HOME/old copy/playwright-core" >"$CACHE/.links/aaa"
+  echo "$TMP/deleted/playwright-core" >"$CACHE/.links/bbb"
+}
+
+test_audit_finds_playwright_builds_older_than_the_installed_browser() {
+  audit_setup
+  playwright_cache_setup
+  fake_bundle "$MS_APPLICATIONS_DIR/Google Chrome.app" 156.0.8078.80
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than Google Chrome 156"
+  assert_contains "$out" "Update or remove the Playwright copies that use it: ~/old copy/playwright-core."
+  assert_not_contains "$out" "(chromium-1248)"
+  assert_contains "$out" "Playwright's Firefox 146.0.1 (firefox-1509) is older than the newest build Playwright has here, 152"
+  assert_not_contains "$out" "(firefox-1555)"
+}
+
+test_audit_names_the_newer_reference_when_the_installed_browser_is_behind() {
+  audit_setup
+  playwright_cache_setup
+  fake_bundle "$MS_APPLICATIONS_DIR/Google Chrome.app" 150.0.1
+  fake_bundle "$MS_APPLICATIONS_DIR/Firefox.app" 160.0
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than the newest build Playwright has here, 156"
+  assert_not_contains "$out" "older than Google Chrome"
+  assert_contains "$out" "Playwright's Firefox 152.0 (firefox-1555) is older than Firefox 160"
+}
+
+test_audit_reads_the_playwright_cache_the_environment_names() {
+  audit_setup
+  playwright_cache_setup "$TMP/pw browsers"
+  export PLAYWRIGHT_BROWSERS_PATH="$TMP/pw browsers"
+  assert_contains "$(audit_findings)" "(chromium-1200) is older than"
+  export PLAYWRIGHT_BROWSERS_PATH=0
+  assert_not_contains "$(audit_findings)" "stale-playwright-browser"
+}
+
+test_audit_does_not_call_a_build_unused_when_a_browser_list_is_unreadable() {
+  audit_setup
+  playwright_cache_setup
+  echo '{"browsers": [' >"$HOME/old copy/playwright-core/browsers.json"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Which copies use it is unknown, since these copies could not be read: ~/old copy/playwright-core."
+  assert_not_contains "$out" "No installed copy of Playwright uses it"
+}
+
+test_audit_does_not_read_a_playwright_copy_in_a_protected_folder() {
+  audit_setup
+  playwright_cache_setup
+  mkdir -p "$HOME/Documents/project/playwright-core"
+  cp "$FIXTURES/playwright-browsers.json" "$HOME/Documents/project/playwright-core/browsers.json"
+  echo "$HOME/Documents/project/playwright-core" >"$CACHE/.links/aaa"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Which copies use it is unknown, since these copies could not be read: ~/Documents/project/playwright-core."
+}
+
+test_audit_checks_a_headless_shell_build_by_its_recorded_version() {
+  audit_setup
+  playwright_cache_setup
+  mkdir -p "$CACHE/chromium_headless_shell-1190/chrome-headless-shell-mac-arm64" "$CACHE/chromium_headless_shell-1200"
+  python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); d["browsers"][1].update(revision="1190", browserVersion="142.0.7444.0"); json.dump(d, open(sys.argv[2], "w"), indent=2)' \
+    "$FIXTURES/playwright-browsers.json" "$HOME/old copy/playwright-core/browsers.json"
+  fake_bundle "$MS_APPLICATIONS_DIR/Google Chrome.app" 156.0.8078.80
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium headless shell 142.0.7444.0 (chromium_headless_shell-1190) is older than Google Chrome 156"
+  assert_not_contains "$out" "(chromium_headless_shell-1200)"
+}
+
+test_audit_checks_the_default_cache_and_the_one_the_environment_names() {
+  audit_setup
+  playwright_cache_setup
+  playwright_cache_setup "$TMP/other cache"
+  export PLAYWRIGHT_BROWSERS_PATH="$TMP/other cache"
+  local out
+  out=$(audit_findings)
+  assert_eq 2 "$(printf '%s' "$out" | grep -o '(chromium-1200) is older' | wc -l | tr -d ' ')" "chromium-1200 findings"
+}
+
+test_audit_reports_a_playwright_build_it_cannot_read() {
+  audit_setup
+  playwright_cache_setup
+  mkdir -p "$CACHE/chromium-1100/chrome-mac-arm64"
+  assert_contains "$(audit_findings)" "could not be read, so they were not compared with the installed browsers: chromium-1100."
+}
+
+test_audit_names_no_copy_for_an_unused_playwright_build() {
+  audit_setup
+  playwright_cache_setup
+  rm "$CACHE/.links/aaa"
+  local out
+  out=$(audit_findings)
+  assert_contains "$out" "Playwright's Chromium 143.0.7499.4 (chromium-1200) is older than the newest build Playwright has here, 156"
+  assert_contains "$out" "No installed copy of Playwright uses it: rm -r '$CACHE/chromium-1200'"
+}
+
 test_audit_changes_nothing() {
   audit_setup
   audit_findings >/dev/null
