@@ -198,6 +198,87 @@ audit_homebrew() {
   fi
 }
 
+# One finding per scanned location with critical or high matches, and one per malware match.
+# With the module off, earlier results are not reported: nothing refreshes them, so they would read
+# as current.
+audit_vulns() {
+  local age what action
+  if ! ms_user_enabled vulns; then
+    finding low vuln-scan-off "Installed tools, packages and apps are not checked for known vulnerabilities." "brew install grype syft; mac-secure enable vulns"
+    return 0
+  fi
+  if ! ms_module_available vulns; then
+    finding medium vuln-scan-missing "The vulns module is on, but $(ms_module_missing_tool vulns) is not installed, so nothing is scanned." "brew install grype syft"
+    return 0
+  fi
+  if [ ! -f "$MS_VULN_RESULTS" ]; then
+    finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
+    return 0
+  fi
+  if [ -f "$MS_VULN_GAPS" ]; then
+    while IFS=$'\t' read -r what action; do
+      [ -z "$what" ] || finding low vuln-coverage-gap "$what" "$action"
+    done <"$MS_VULN_GAPS"
+  fi
+  if ! age=$(ms_vuln_scan_age_days); then
+    finding medium vuln-scan-stale "No vulnerability scan has finished every location, so some may not have been checked." "mac-secure logs daily, or: mac-secure run vulns"
+  elif [ "$age" -gt "$MS_VULN_STALE_DAYS" ]; then
+    finding medium vuln-scan-stale "The last complete vulnerability scan is $age days old, so newer advisories are not reflected." "mac-secure logs daily, or: mac-secure run vulns"
+  fi
+  ms_vulns_effective | awk -F'\t' -v home="$HOME" '
+    function show(p) { return index(p, home "/") == 1 ? "~" substr(p, length(home) + 1) : p }
+    function label(t) { return t == "homebrew" ? "Homebrew formulae" : show(t) }
+    function count_of(n, one, many) { return n " " (n == 1 ? one : many) }
+    # What to update or remove: the first directory or file under the location, or the first two
+    # when the first only groups others, such as bin, share or Versions. A formula for Homebrew.
+    function unit(t, path, name,    rel, n, parts) {
+      if (t == "homebrew") return name
+      rel = substr(path, length(t) + 2)
+      n = split(rel, parts, "/")
+      if (n >= 2 && parts[1] ~ /^(bin|lib|libexec|share|Versions|node_modules|pipx|venvs|tools)$/) return parts[1] "/" parts[2]
+      return parts[1]
+    }
+    $5 == "malware" {
+      if (!(($3, $11) in seen)) {
+        seen[$3, $11] = 1
+        printf "high\tmalware-package\t%s %s at %s matches malware advisory %s.\tCheck that the advisory applies to this copy. If it does, remove it and change the credentials your account can read.\n", $9, $10, show($11), $3
+      }
+      next
+    }
+    $2 != "Critical" && $2 != "High" { if (!($1 in quiet)) { quiet[$1] = 1; nquiet++ } if (!(($3, $9, $10) in lowseen)) { lowseen[$3, $9, $10] = 1; lower++ } next }
+    {
+      t = $1; pkg = $9 " " $10; part = unit(t, $11, $9)
+      if (!(t in vulns)) order[++nt] = t
+      # A vulnerability counts once per package version, however many copies of it are installed.
+      if (!((t, $3, pkg) in seen_vuln)) { seen_vuln[t, $3, pkg] = 1; vulns[t]++ }
+      if (!((t, pkg) in seen_pkg)) { seen_pkg[t, pkg] = 1; npkg[t]++ }
+      if (!((t, part) in per)) units[t, ++nunits[t]] = part
+      if (!((t, part, $3, pkg) in seen_unit)) { seen_unit[t, part, $3, pkg] = 1; per[t, part]++ }
+      if ($4 == "kev" && !((t, $3) in kevseen)) { kevseen[t, $3] = 1; if (++nkev[t] <= 2) kevids[t] = kevids[t] (nkev[t] > 1 ? ", " : "") $3 }
+      if ($2 == "Critical" && $6 == "fixed") fixable[t]++
+    }
+    END {
+      for (i = 1; i <= nt; i++) {
+        t = order[i]; top = ""
+        for (k = 1; k <= 3; k++) {
+          best = ""; most = 0
+          for (j = 1; j <= nunits[t]; j++) { u = units[t, j]; if (per[t, u] > most && !((t, u) in used)) { best = u; most = per[t, u] } }
+          if (best == "") break
+          used[t, best] = 1
+          top = top (top == "" ? "" : ", ") best " (" most ")"
+        }
+        what = sprintf("%s: %s in %s", label(t), count_of(vulns[t], "critical or high vulnerability", "critical or high vulnerabilities"),
+          count_of(npkg[t], "package", "packages"))
+        if (nkev[t] > 0) what = what sprintf(", %d known to be exploited (%s%s)", nkev[t], kevids[t], nkev[t] > 2 ? ", ..." : "")
+        printf "%s\tvulnerable-software\t%s. Most affected: %s.\tmac-secure vulns %s lists each one and the version that fixes it. Update what you use and remove what you do not.\n",
+          (nkev[t] > 0 || fixable[t] > 0) ? "high" : "medium", what, top, (t == "homebrew" ? "homebrew" : show(t))
+      }
+      if (lower > 0) printf "info\tlower-vulnerabilities\t%s in %s.\tmac-secure vulns --all\n",
+        count_of(lower, "medium, low or unscored vulnerability", "medium, low or unscored vulnerabilities"), count_of(nquiet, "location", "locations")
+    }
+  ' >>"$MS_AUDIT_OUT"
+}
+
 ms_audit_collect() {
   MS_AUDIT_OUT=$1
   audit_core
@@ -212,6 +293,7 @@ ms_audit_collect() {
   audit_listeners
   audit_stale_browsers
   audit_homebrew
+  audit_vulns
 }
 
 # Most severe first.
