@@ -9,6 +9,9 @@ MS_CONFIG_DIR="$HOME/.config/mac-secure"
 MS_STATE_DIR="$HOME/Library/Application Support/mac-secure"
 MS_LOG_DIR="$HOME/Library/Logs/mac-secure"
 MS_AGENT_DIR="$HOME/Library/LaunchAgents"
+MS_EOL_DIR="$MS_STATE_DIR/eol"
+# Audit findings, one tab-separated "severity id finding action" per line, from the eol module.
+MS_EOL_RESULTS="$MS_EOL_DIR/findings.tsv"
 MS_ROOT_LIBEXEC=${MS_ROOT_LIBEXEC:-/usr/local/libexec/mac-secure}
 MS_ROOT_CONF="$MS_ROOT_LIBEXEC/root.conf"
 MS_ROOT_LOG=${MS_ROOT_LOG:-/var/log/mac-secure/macos.log}
@@ -59,6 +62,14 @@ ms_nvm_dir() {
     '') dir=${NVM_DIR:-$HOME/.nvm} ;;
   esac
   printf '%s' "${dir%/}"
+}
+
+# plutil can print its error to stdout, so a failed read must print nothing. Here rather than in
+# status.sh because the daily job reads plists and JSON too.
+ms_plist_value() {
+  local value
+  value=$(plutil -extract "$2" raw -o - "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$value"
 }
 
 ms_free_gib() {

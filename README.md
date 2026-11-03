@@ -54,6 +54,7 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `claude-code` | you | yes | Updates Claude Code | None |
 | `colima` | you | no | Patches Ubuntu and Docker in running Colima VMs | Restarts Docker and VMs; waits while a CI job is running |
 | `vulns` | you | yes | Scans installed tools, packages, editor extensions and apps for known vulnerabilities and malware, and notifies you of new ones | None. Its database takes about 3 GB of disk, and each daily update downloads about 200 MB |
+| `eol` | you | yes | Reports runtimes past their end of life (Node.js from nvm, Python from python.org and uv, .NET SDKs) and Homebrew packages Homebrew has deprecated or disabled | None. Removes nothing; fetches end-of-life dates from endoflife.date once a day |
 | `browsers` | you | yes | Restarts browsers that run old code after an update | Closes the browser 30 minutes after a warning; stops stale automation profiles without a restart |
 | `macos` | root | yes | Keeps macOS auto-update settings on, installs updates that need no restart, downloads the rest | Safari closes when it updates; macOS's own automatic install can restart the Mac overnight |
 | `macos-unattended` | root | no | Installs restart-required macOS updates by itself at the scheduled hour | Creates a hidden admin account with a stored random password; restarts the Mac after a 5-minute warning |
@@ -118,6 +119,12 @@ A location that cannot be scanned keeps its previous results, and the module rep
 A match is a lead, not a verdict. To leave out one you reviewed, add a line to `vulns-ignore.txt`: the advisory id alone, or the id, a part of the path, and why, separated by `|`.
 
 Not covered: Playwright's browser builds, which no scanner here identifies; container images; project checkouts, unless added with `VULN_SCAN_PATHS`; Homebrew casks, which `brew vulns` does not check; and formulae `brew vulns` skips for lack of a supported source URL, which the module's result counts.
+
+## End-of-life runtimes
+
+A runtime past its end of life gets no more security fixes, and an old one left installed is still run by whatever finds it first. The `eol` module looks at Node.js versions from nvm, Python from python.org and from uv, and .NET SDKs, and compares each with the end-of-life dates [endoflife.date](https://endoflife.date) publishes, fetched once a day; it sends only the product names. It also lists Homebrew formulae and casks that Homebrew has deprecated or disabled, with the installed formulae that still need each one. `audit` reports each as `end-of-life` or `homebrew-unsupported`, with the command that removes it.
+
+Nothing is removed for you: a project can pin an old Node in `.nvmrc`, a virtual environment can run on an old Python, and `global.json` can name an old .NET SDK. Check those before you remove one.
 
 ## Trust model
 

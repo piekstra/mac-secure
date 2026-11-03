@@ -1,0 +1,41 @@
+{
+  "formulae": [
+    {
+      "name": "python@3.8",
+      "deprecated": true,
+      "disabled": true,
+      "deprecation_reason": "deprecated_upstream",
+      "disable_reason": "deprecated_upstream"
+    },
+    {
+      "name": "openssl@1.1",
+      "deprecated": true,
+      "disabled": false,
+      "deprecation_reason": "unsupported",
+      "disable_reason": null
+    },
+    {
+      "name": "jq",
+      "deprecated": false,
+      "disabled": false,
+      "deprecation_reason": null,
+      "disable_reason": null
+    }
+  ],
+  "casks": [
+    {
+      "token": "old-app",
+      "deprecated": true,
+      "disabled": false,
+      "deprecation_reason": "discontinued",
+      "disable_reason": null
+    },
+    {
+      "token": "new-app",
+      "deprecated": false,
+      "disabled": false,
+      "deprecation_reason": null,
+      "disable_reason": null
+    }
+  ]
+}

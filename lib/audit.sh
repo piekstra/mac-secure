@@ -448,6 +448,15 @@ audit_vulns() {
   ' >>"$MS_AUDIT_OUT"
 }
 
+audit_eol() {
+  ms_user_enabled eol || return 0
+  if [ ! -f "$MS_EOL_RESULTS" ]; then
+    finding low eol-check-missing "The eol module is on, but no end-of-life check has finished." "mac-secure run eol"
+    return 0
+  fi
+  cat "$MS_EOL_RESULTS" >>"$MS_AUDIT_OUT"
+}
+
 ms_audit_collect() {
   MS_AUDIT_OUT=$1
   audit_core
@@ -464,6 +473,7 @@ ms_audit_collect() {
   audit_playwright_browsers
   audit_homebrew
   audit_vulns
+  audit_eol
 }
 
 # Most severe first.

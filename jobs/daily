@@ -777,6 +777,132 @@ EOF
   return 0
 }
 
+# The end-of-life date endoflife.date gives a release cycle, from a list cached by ch_eol: a date,
+# "past" when it says only that the cycle has ended, or nothing when it names no end yet.
+# Returns 1 when the list does not have the cycle. Usage: eol_date <list> <cycle>
+eol_date() {
+  local i=0 cycle eol
+  while [ "$i" -lt 300 ] && cycle=$(ms_plist_value "$1" "$i.cycle"); do
+    if [ "$cycle" = "$2" ]; then
+      eol=$(ms_plist_value "$1" "$i.eol") || return 0
+      case "$eol" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) echo "$eol" ;;
+        true) echo past ;;
+      esac
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# Prints "<product>|<cycle>|<what>|<version>|<path>|<how to remove>" for each runtime installed in a
+# place mac-secure knows, one line per copy.
+eol_runtimes() {
+  local dir version name
+  for dir in "$(ms_nvm_dir)/versions/node"/v[0-9]*; do
+    [ -d "$dir" ] || continue
+    version=${dir##*/v}
+    echo "nodejs|${version%%.*}|Node.js from nvm|$version|$dir|nvm uninstall $version, once no project's .nvmrc needs it. If it is nvm's default, set another first: nvm alias default <version>"
+  done
+  for dir in "${MS_SYSTEM_LIBRARY:-/Library}/Frameworks/Python.framework/Versions"/[0-9]*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    version=${dir##*/}
+    echo "python|$version|Python from python.org|$version|$dir|Once no virtual environment uses it: sudo rm -rf '$dir', and its links in /usr/local/bin"
+  done
+  for dir in "$HOME/.local/share/uv/python"/cpython-[0-9]*; do
+    # uv also keeps a link per minor version, beside the installation it points at.
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    name=${dir##*/cpython-}
+    version=${name%%-*}
+    echo "python|${version%.*}|Python managed by uv|$version|$dir|uv python uninstall $version"
+  done
+  for dir in "${MS_DOTNET_ROOT:-/usr/local/share/dotnet}/sdk"/[0-9]*; do
+    [ -d "$dir" ] || continue
+    version=${dir##*/}
+    # endoflife.date names .NET 5 and later by major version, and earlier ones as major.minor.
+    case "$version" in
+      [0-4].*) name=$(echo "$version" | cut -d. -f1,2) ;;
+      *) name=${version%%.*} ;;
+    esac
+    echo "dotnet|$name|.NET SDK|$version|$dir|Once no project's global.json needs it: sudo rm -rf '$dir'"
+  done
+}
+
+# Prints Homebrew's own word on what it no longer supports, as audit findings: a disabled package
+# cannot be installed or upgraded any more, a deprecated one soon will not. Homebrew needs the
+# Command Line Tools, so this python3 is never the shim that asks to install them.
+eol_homebrew() {
+  local info severity kind name reason what users action
+  info=$(brew info --json=v2 --installed 2>/dev/null) || return 1
+  printf '%s' "$info" | /usr/bin/python3 -I -c '
+import json, sys
+report = json.load(sys.stdin)
+for kind, key, name in (("formula", "formulae", "name"), ("cask", "casks", "token")):
+    for item in report.get(key, []):
+        if item.get("disabled") or item.get("deprecated"):
+            state = "disabled" if item.get("disabled") else "deprecated"
+            reason = item.get("disable_reason") or item.get("deprecation_reason") or ""
+            print("|".join([state, kind, item[name], str(reason)]))
+' | while IFS='|' read -r state kind name reason; do
+    [ -n "$name" ] || continue
+    severity=low
+    [ "$state" != disabled ] || severity=medium
+    what="Homebrew has $state the $kind $name${reason:+ ($reason)}, so it gets no more updates."
+    users=""
+    [ "$kind" != formula ] || users=$(brew uses --installed "$name" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    if [ -n "$users" ]; then
+      action="Installed formulae need it: $users. Replace or remove those first."
+    elif [ "$kind" = cask ]; then
+      action="brew uninstall --cask $name"
+    else
+      action="brew uninstall $name"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$severity" homebrew-unsupported "$what" "$action"
+  done
+}
+
+# Writes audit findings for each installed runtime past its end of life, and each Homebrew package
+# Homebrew has deprecated or disabled. Removes nothing. Dates come from endoflife.date; a list that
+# cannot be fetched is used from the last fetch, and with none the check is retried.
+ch_eol() {
+  local work product cycle what version path action date today missing="" count
+  work=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-eol.XXXXXX") || return 1
+  mkdir -p "$MS_EOL_DIR"
+  for product in nodejs python dotnet; do
+    if curl -q -sf --max-time 30 -o "$work/$product.json" "https://endoflife.date/api/$product.json" &&
+      ms_plist_value "$work/$product.json" 0.cycle >/dev/null; then
+      mv -f "$work/$product.json" "$MS_EOL_DIR/$product.json"
+    fi
+  done
+  today=$(date +%Y-%m-%d)
+  : >"$work/findings.tsv"
+  for product in nodejs python dotnet; do
+    [ -f "$MS_EOL_DIR/$product.json" ] || missing="$missing $product"
+  done
+  while IFS='|' read -r product cycle what version path action; do
+    [ -n "$product" ] && [ -f "$MS_EOL_DIR/$product.json" ] || continue
+    date=$(eol_date "$MS_EOL_DIR/$product.json" "$cycle") || continue
+    case "$date" in
+      past) printf '%s\t%s\t%s\t%s\n' medium end-of-life "$what $version at $path has reached its end of life, so it gets no more security fixes." "$action" ;;
+      '') ;;
+      *) [ "$date" \> "$today" ] ||
+        printf '%s\t%s\t%s\t%s\n' medium end-of-life "$what $version at $path reached its end of life on $date, so it gets no more security fixes." "$action" ;;
+    esac
+  done >>"$work/findings.tsv" <<EOF
+$(eol_runtimes)
+EOF
+  if command -v brew >/dev/null 2>&1; then
+    eol_homebrew >>"$work/findings.tsv" || missing="$missing homebrew"
+  fi
+  count=$(grep -c . "$work/findings.tsv")
+  mv -f "$work/findings.tsv" "$MS_EOL_RESULTS"
+  rm -rf "$work"
+  detail "$count past end of life or unsupported; not checked:${missing:- none}"
+  [ -z "$missing" ] || return 75
+  return 0
+}
+
 module_limit_seconds() {
   [ -z "${MS_MODULE_LIMIT:-}" ] || { echo "$MS_MODULE_LIMIT"; return; }
   case $1 in

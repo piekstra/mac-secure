@@ -18,6 +18,7 @@ playwright|user|-|yes|Keep the Playwright copies you already use, and their brow
 claude-code|user|claude|yes|Update Claude Code|None.
 colima|user|colima|no|Patch Ubuntu and Docker in running Colima VMs|Restarts Docker and VMs. Waits while a CI job is running.
 vulns|user|grype+syft|yes|Scan installed tools, packages, editor extensions and apps for known vulnerabilities and malware, and notify about new ones|None. Its vulnerability database takes about 3 GB of disk, and each daily update downloads about 200 MB.
+eol|user|-|yes|Report runtimes past their end of life, such as old Node, Python and .NET versions, and Homebrew packages Homebrew no longer supports|None. Removes nothing. Fetches end-of-life dates for Node.js, Python and .NET from endoflife.date once a day.
 browsers|user|-|yes|Restart browsers that still run old code after an update|Closes the browser 30 minutes after a warning. Stops stale automation profiles without a restart.
 macos|root|-|yes|Keep macOS auto-update settings on, install updates that need no restart, download the rest|Safari closes when it updates. macOS's own automatic install can restart the Mac overnight.
 macos-unattended|root|-|no|Install restart-required macOS updates by itself at the scheduled hour|Creates a hidden admin account with a stored random password. Restarts the Mac after a 5-minute warning.

@@ -34,6 +34,10 @@ A session can start with lines beginning `mac-secure:`, from the plugin's start-
 - `vulns-ignore.txt` hides matches from everyone who reads the results. Add a line only for a match the user reviewed and asked to hide.
 - `vuln-scan-stale` or `vuln-scan-missing` means the results are old or absent. Say so rather than reporting the Mac as clean, and read `mac-secure logs daily`.
 
+## End-of-life findings
+
+`end-of-life` and `homebrew-unsupported` name a runtime or package that no longer gets fixes, with the command that removes it. Before proposing removal, look for what uses it: `.nvmrc` files for Node, `pyvenv.cfg` files naming that Python, `global.json` for .NET, and the dependents the finding lists for Homebrew. List what you found and let the user decide per item.
+
 ## Changing the Mac
 
 Enabling a module changes what happens to this Mac every night, so the user decides. Before running `enable`:
