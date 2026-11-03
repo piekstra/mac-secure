@@ -126,6 +126,20 @@ test_status_reports_a_removed_vendor_list_as_outdated() {
   assert_contains "$(mac_secure status --json)" '"root_job":"current"'
 }
 
+test_plist_read_error_on_stdout_is_not_taken_for_a_value() {
+  install_root_copy
+  stub plutil 'echo "file: Could not extract value, error: No value at that key path"; exit 1'
+  assert_contains "$(mac_secure status --json)" '"root_job":"current"'
+}
+
+test_plist_values_are_read_only_through_the_two_wrappers() {
+  local reads wrappers
+  reads=$(cd "$REPO" && grep -rn 'plutil -extract' bin jobs lib root | cut -d: -f1 | sort | tr '\n' ' ')
+  assert_eq "lib/status.sh root/macos-update " "$reads" "files reading plists directly"
+  wrappers=$(sed -n 's/.*value=\$(\(plutil -extract.*\)$/\1/p' "$REPO/lib/status.sh" "$REPO/root/macos-update" | sort -u | wc -l | tr -d ' ')
+  assert_eq 1 "$wrappers" "the two wrappers should read the same way"
+}
+
 test_status_shows_root_module_results() {
   printf '2026-01-01 03:00\tmacos\tok\t0\tinstalling\n2026-01-01 03:05\tmacos\tfailed\t0\tsee log\n' >"$MS_ROOT_RESULTS"
   local out
@@ -331,11 +345,11 @@ detail_of() {
 test_daily_records_ok_failed_and_skipped() {
   stub bun 'case "$1" in --version) echo 1.2.3 ;; esac; exit 0'
   stub uv 'exit 1'
-  rm "$STUBS/gcloud"
-  run_daily bun uv gcloud
+  rm "$STUBS/colima"
+  run_daily bun uv colima
   assert_eq ok "$(result_of bun)"
   assert_eq failed "$(result_of uv)"
-  assert_eq skipped "$(result_of gcloud)"
+  assert_eq skipped "$(result_of colima)"
   assert_called 'osascript'
   assert_contains "$(cat "$CALLS")" 'Failed: uv'
 }
@@ -835,6 +849,24 @@ test_vendor_accepts_a_newer_version_comparing_numerically() {
   update_vendor_pkg example ABCDE12345 >/dev/null
   assert_called 'installer -pkg'
   assert_eq 10.0.0 "$(cat "$STATE/vendor/example")"
+}
+
+test_cask_field_ignores_a_plist_error_printed_to_stdout() {
+  load_root_job
+  stub uname 'echo x86_64'
+  stub sw_vers 'echo 15.7'
+  stub plutil 'case "$2" in
+    variations.*) echo "file: Could not extract value"; exit 1 ;;
+    *) echo 2.0.0 ;;
+  esac'
+  assert_eq 2.0.0 "$(cask_field "$TMP/any.json" version)"
+}
+
+test_incomplete_cask_metadata_is_refused() {
+  load_root_job
+  vendor_stubs
+  stub plutil 'echo "file: Could not extract value"; exit 1'
+  assert_vendor_refused "Homebrew's metadata is incomplete"
 }
 
 test_vendor_with_no_version_reinstalls_only_when_the_download_changes() {
