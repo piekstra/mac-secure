@@ -89,21 +89,32 @@ ms_vulns_effective() {
 }
 
 # One line per critical, known-exploited or malware match, for telling a new one from one already seen.
+# The key carries the known-exploited and malware flags, so a match that gains one later reads as new.
 ms_vuln_urgent_keys() {
   ms_vulns_effective 2>/dev/null |
-    awk -F'\t' '$2 == "Critical" || $4 == "kev" || $5 == "malware" { print $1 "|" $3 "|" $9 "|" $10 }' | sort -u
+    awk -F'\t' '$2 == "Critical" || $4 == "kev" || $5 == "malware" { print $1 "|" $3 "|" $9 "|" $10 "|" $4 "|" $5 }' | sort -u
 }
 
-# Records when each critical, known-exploited or malware match was first found, as
-# "<key>\t<epoch>", so `notices` can tell new ones from old. A match that went away is dropped.
+# Records when each key from ms_vuln_urgent_keys was first found, as "<key>\t<epoch>", so `notices`
+# can tell new ones from old; a match that went away is dropped. Without the file, as just after an
+# upgrade, a key the previous results already had is dated 0: known, but not new.
+# Usage: ms_vuln_record_first_seen <keys of the previous results>
 ms_vuln_record_first_seen() {
   local now
   now=$(date +%s)
-  ms_vuln_urgent_keys | awk -F'\t' -v OFS='\t' -v now="$now" '
-    FILENAME == ARGV[1] { first[$1] = $2; next }
+  {
+    if [ -f "$MS_VULN_FIRST_SEEN" ]; then
+      cat "$MS_VULN_FIRST_SEEN"
+    else
+      printf '%s\n' "$1" | awk -v OFS='\t' 'NF { print $0, 0 }'
+    fi
+    echo "--end of first-seen--"
+    ms_vuln_urgent_keys
+  } | awk -F'\t' -v OFS='\t' -v now="$now" '
+    $0 == "--end of first-seen--" { known = 1; next }
+    !known { first[$1] = $2; next }
     $0 != "" { print $0, ($0 in first) ? first[$0] : now }
-  ' "${MS_VULN_FIRST_SEEN}" - 2>/dev/null >"$MS_VULN_FIRST_SEEN.new" ||
-    ms_vuln_urgent_keys | awk -v OFS='\t' -v now="$now" '$0 != "" { print $0, now }' >"$MS_VULN_FIRST_SEEN.new"
+  ' >"$MS_VULN_FIRST_SEEN.new"
   mv -f "$MS_VULN_FIRST_SEEN.new" "$MS_VULN_FIRST_SEEN"
 }
 
