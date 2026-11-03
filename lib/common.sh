@@ -47,6 +47,20 @@ ms_tool_path() {
   printf '%s' "${MS_JOB_PATH:-${extra:+$extra:}/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.local/bin:$HOME/google-cloud-sdk/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 }
 
+# nvm's folder: NVM_DIR from config, since launchd gives a job no shell profile, then the environment
+# for a run from a shell, then ~/.nvm. A leading ~/ or $HOME/ in config means the home folder,
+# since the file is read, not sourced.
+ms_nvm_dir() {
+  local dir
+  dir=$(ms_config_get NVM_DIR)
+  case "$dir" in
+    "~"/*) dir="$HOME/${dir#\~/}" ;;
+    '$HOME/'*) dir="$HOME/${dir#\$HOME/}" ;;
+    '') dir=${NVM_DIR:-$HOME/.nvm} ;;
+  esac
+  printf '%s' "${dir%/}"
+}
+
 ms_free_gib() {
   { df -k /System/Volumes/Data 2>/dev/null || df -k /; } | awk 'NR==2{printf "%d",$4/1048576}'
 }

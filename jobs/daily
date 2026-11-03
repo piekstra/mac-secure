@@ -220,7 +220,7 @@ upgrade_npm_globals() {
     [ "$pkg" != "$skip" ] || continue
     if out=$(npm install -g "$pkg@latest" 2>&1); then
       NPM_COUNT=$((NPM_COUNT + 1))
-    elif printf '%s' "$out" | grep -q EBADENGINE; then
+    elif [ -n "${npm_config_engine_strict:-}" ] && printf '%s\n' "$out" | grep -qE '^npm (ERR!|error) code EBADENGINE'; then
       NPM_HELD="$NPM_HELD $pkg"
     else
       NPM_FAILED="$NPM_FAILED $pkg"
@@ -261,6 +261,19 @@ npm_restore() {
   rm -rf "$modules/.npm.mac-secure-replaced"
 }
 
+# A run stopped partway can leave the copy nvm_update_npm keeps, and npm missing or not running. This
+# deals with it before anything runs that Node's npm. Usage: nvm_recover_npm <Node folder>
+nvm_recover_npm() {
+  local node=$1 modules=$1/lib/node_modules
+  [ -d "$modules/.npm.mac-secure-previous" ] || return 0
+  if npm_runs "$node"; then
+    rm -rf "$modules/.npm.mac-secure-previous"
+    return 0
+  fi
+  echo "npm on $(basename "$node") does not run; putting back the copy an earlier run kept"
+  npm_restore "$modules" || { echo "could not put back $modules/.npm.mac-secure-previous"; return 1; }
+}
+
 # Runs install-latest-npm for one Node, and puts the previous npm back if the new one does not run
 # there: nvm picks from a table inside it, which an old nvm may not have for a newer npm. The copy
 # sits beside npm, so the swap is a rename on one volume, and a copy that a stopped run left behind
@@ -270,14 +283,6 @@ nvm_update_npm() {
   node="$dir/versions/node/$version"
   modules="$node/lib/node_modules"
   previous="$modules/.npm.mac-secure-previous"
-  if [ -d "$previous" ]; then
-    if npm_runs "$node"; then
-      rm -rf "$previous"
-    else
-      echo "npm on $version does not run; putting back the copy an earlier run kept"
-      npm_restore "$modules" || { echo "could not put back $previous"; return 1; }
-    fi
-  fi
   cp -Rp "$modules/npm" "$previous" || { rm -rf "$previous"; return 1; }
   # shellcheck disable=SC1090
   ( export NVM_DIR="$dir"; . "$script" --no-use && nvm use --silent "$version" && nvm install-latest-npm )
@@ -297,9 +302,11 @@ nvm_update_npm() {
 ch_npm() {
   local dir script version nvm_bin="" used=0 nvm_note="" unchecked=""
   local NPM_COUNT=0 NPM_FAILED="" NPM_HELD=""
-  # launchd gives the job no shell profile, so a folder other than ~/.nvm comes from config.
-  dir=$(ms_config_get NVM_DIR "${NVM_DIR:-$HOME/.nvm}")
-  if script=$(nvm_script "$dir"); then
+  dir=$(ms_nvm_dir)
+  if [ -n "$(ms_config_get NVM_DIR)" ] && [ ! -d "$dir/versions/node" ]; then
+    used=1
+    unchecked="$unchecked NVM_DIR $dir has no versions/node"
+  elif script=$(nvm_script "$dir"); then
     used=1
     # shellcheck disable=SC1090
     version=$( (export NVM_DIR="$dir"; . "$script" --no-use >/dev/null 2>&1 && nvm version default) 2>/dev/null)
@@ -328,6 +335,7 @@ ch_npm() {
   fi
   if [ -n "$nvm_bin" ]; then
     nvm_note="; nvm default $version"
+    nvm_recover_npm "${nvm_bin%/bin}" || NPM_FAILED="$NPM_FAILED npm($version)"
     # A check that could not run, such as offline after a wake, means npm is not touched either.
     if PATH="$nvm_bin:$PATH" npm_config_engine_strict=true upgrade_npm_globals npm; then
       nvm_update_npm "$script" "$dir" "$version" || NPM_FAILED="$NPM_FAILED npm($version)"

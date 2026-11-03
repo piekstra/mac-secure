@@ -38,7 +38,7 @@ ms_vuln_extra_targets() {
 ms_vuln_default_targets() {
   local prefix
   cat <<EOF
-$HOME/.nvm/versions/node
+$(ms_nvm_dir)/versions/node
 $HOME/.volta/tools
 $HOME/Library/Application Support/fnm
 $HOME/.npm/_npx

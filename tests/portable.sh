@@ -464,6 +464,7 @@ EOF
   cat >"$root/bin/npm" <<'EOF'
 #!/bin/bash
 printf 'nvm-npm %s engine_strict=%s\n' "$*" "${npm_config_engine_strict:-}" >>"$CALLS"
+[ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] || exit 1
 case "$1" in
   --version) [ ! -f "$(dirname "$0")/../lib/node_modules/npm/broken" ] && echo 10.0.0 ;;
   outdated)
@@ -515,6 +516,37 @@ test_npm_puts_back_the_copy_a_stopped_run_left() {
   assert_eq ok "$(result_of npm)"
   [ -e "$modules/npm/good" ] || fail "the kept copy was not put back"
   [ ! -e "$modules/npm/broken" ] || fail "the npm that does not run is still in place"
+}
+
+test_npm_reads_a_home_relative_nvm_dir_and_scans_it() {
+  nvm_setup "$HOME/.config/nvm"
+  stub npm 'exit 0'
+  mkdir -p "$HOME/.config/mac-secure"
+  echo 'NVM_DIR=~/.config/nvm' >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq ok "$(result_of npm)"
+  assert_called 'nvm-npm install -g ccusage@latest'
+  ( . "$REPO/lib/common.sh"; . "$REPO/lib/vulns.sh"; ms_vuln_targets ) | grep -qx "$HOME/.config/nvm/versions/node" ||
+    fail "the vulns scan does not cover the configured nvm folder"
+}
+
+test_npm_configured_nvm_dir_that_is_missing_defers() {
+  stub npm 'exit 0'
+  mkdir -p "$HOME/.config/mac-secure"
+  echo 'NVM_DIR=~/nowhere' >"$HOME/.config/mac-secure/config"
+  run_daily npm
+  assert_eq deferred "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "NVM_DIR $HOME/nowhere has no versions/node"
+}
+
+test_npm_engine_warning_on_another_failure_is_a_failure() {
+  stub npm 'case "$1" in
+    outdated) echo "/x/lib/node_modules/tool:tool@2.0.0:tool@1.0.0:tool@2.0.0:global"; exit 1 ;;
+    install) echo "npm warn EBADENGINE Unsupported engine"; echo "npm error code ECONNRESET"; exit 1 ;;
+  esac'
+  run_daily npm
+  assert_eq failed "$(result_of npm)"
+  assert_contains "$(detail_of npm)" "failed: tool"
 }
 
 test_npm_offline_nvm_check_defers_without_touching_npm() {
