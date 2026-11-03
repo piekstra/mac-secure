@@ -188,68 +188,109 @@ EOF
   done <"$list"
 }
 
-# Prints "<browser>-<revision>|<path>" for each browser build an installed copy of Playwright needs,
-# and "unreadable|<path>" for a copy whose list could not be read. Each file in .links holds the
-# path of one copy, whose browsers.json lists the revisions it uses.
+# Looking inside these can raise a macOS privacy prompt for whatever app runs audit, so a Playwright
+# copy there is reported as unknown rather than read.
+playwright_path_is_protected() {
+  case "$1" in
+    "$HOME/Desktop" | "$HOME/Desktop/"* | "$HOME/Documents" | "$HOME/Documents/"* | "$HOME/Downloads" | "$HOME/Downloads/"* | \
+      "$HOME/Library/Mobile Documents/"* | /Volumes/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints "<build folder>|<copy path>|<browser version>" for each build an installed copy of Playwright
+# needs, and "unreadable|<copy path>|" for a copy whose list could not be read. Each file in .links
+# holds the path of one copy, whose browsers.json names each build and its browser version.
 playwright_build_users() {
-  local link path i name revision found
+  local link path i name revision version found
   for link in "$1/.links"/*; do
     [ -f "$link" ] || continue
     path=$(cat "$link")
+    if playwright_path_is_protected "$path"; then
+      echo "unreadable|$path|"
+      continue
+    fi
     [ -d "$path" ] || continue
     i=0 found=0
     while [ "$i" -lt 100 ] && name=$(ms_plist_value "$path/browsers.json" "browsers.$i.name"); do
       found=1
       case "$name" in
-        chromium|firefox) revision=$(ms_plist_value "$path/browsers.json" "browsers.$i.revision") && echo "$name-$revision|$path" ;;
+        chromium | chromium-headless-shell | firefox)
+          revision=$(ms_plist_value "$path/browsers.json" "browsers.$i.revision") &&
+            version=$(ms_plist_value "$path/browsers.json" "browsers.$i.browserVersion" || true) &&
+            echo "$(echo "$name" | tr '-' '_')-$revision|$path|$version"
+          ;;
       esac
       i=$((i + 1))
     done
-    [ "$found" -eq 1 ] || echo "unreadable|$path"
+    [ "$found" -eq 1 ] || echo "unreadable|$path|"
+  done
+}
+
+# Prints "<kind>|<build folder>|<version>" for each build in the cache, and "unknown|<build folder>|"
+# for one whose version could not be read. A headless shell sharing its revision with a full Chromium
+# build is the same browser, so only the full build is listed.
+playwright_cache_builds() {
+  local cache=$1 users=$2 dir build kind plist version
+  for dir in "$cache"/chromium-[0-9]* "$cache"/chromium_headless_shell-[0-9]* "$cache"/firefox-[0-9]*; do
+    [ -d "$dir" ] || continue
+    build=$(basename "$dir")
+    kind=${build%-*}
+    case "$kind" in chromium_headless_shell) [ ! -d "$cache/chromium-${build##*-}" ] || continue ;; esac
+    version=""
+    for plist in "$dir"/chrome-mac*/*.app/Contents/Info.plist "$dir"/firefox/*.app/Contents/Info.plist; do
+      [ -f "$plist" ] || continue
+      version=$(ms_plist_value "$plist" CFBundleShortVersionString) && break
+    done
+    # A headless shell has no app bundle; the copies that use a build record its version.
+    [ -n "$version" ] || version=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" '$1 == b && $3 != "" { print $3; exit }')
+    case "${version%%.*}" in
+      '' | *[!0-9]*) echo "unknown|$build|" ;;
+      *) echo "$kind|$build|$version" ;;
+    esac
   done
 }
 
 # No package scanner identifies Playwright's own browser builds. One older than the installed
-# browser, or than the newest build Playwright has here, lacks the security fixes released since.
-# Playwright deletes a build once no installed copy needs it, so the finding names those copies.
+# browser, or than the newest build Playwright has in the same cache, lacks the security fixes
+# released since. Playwright deletes a build once no installed copy needs it, so the finding names
+# those copies. Both the default cache and PLAYWRIGHT_BROWSERS_PATH are checked, since the daily job
+# and the person's shell may install into different ones.
 audit_playwright_browsers() {
-  local cache=$HOME/Library/Caches/ms-playwright dir build kind plist version builds="" users unreadable
-  local newest_chromium=0 newest_firefox=0 installed newest label browser reference used_by action
-  # 0 puts each copy's browsers in its own node_modules, so the shared cache still holds any others.
-  case "${PLAYWRIGHT_BROWSERS_PATH:-0}" in 0) ;; *) cache=$PLAYWRIGHT_BROWSERS_PATH ;; esac
+  local cache=$HOME/Library/Caches/ms-playwright
+  audit_playwright_cache "$cache"
+  case "${PLAYWRIGHT_BROWSERS_PATH:-0}" in
+    0 | "$cache" | "$cache/") ;;
+    *) audit_playwright_cache "${PLAYWRIGHT_BROWSERS_PATH%/}" ;;
+  esac
+}
+
+audit_playwright_cache() {
+  local cache=$1 builds users unreadable unknown kind build version newest label browser reference installed used_by action
   [ -d "$cache" ] || return 0
-  for dir in "$cache"/chromium-[0-9]* "$cache"/firefox-[0-9]*; do
-    [ -d "$dir" ] || continue
-    for plist in "$dir"/chrome-mac*/*.app/Contents/Info.plist "$dir"/firefox/*.app/Contents/Info.plist; do
-      [ -f "$plist" ] && break
-    done
-    [ -f "$plist" ] || continue
-    version=$(ms_plist_value "$plist" CFBundleShortVersionString) || continue
-    case "${version%%.*}" in ''|*[!0-9]*) continue ;; esac
-    build=$(basename "$dir")
-    kind=${build%-*}
-    builds="$builds$kind|$build|$version
-"
-    if [ "$kind" = chromium ] && [ "${version%%.*}" -gt "$newest_chromium" ]; then newest_chromium=${version%%.*}; fi
-    if [ "$kind" = firefox ] && [ "${version%%.*}" -gt "$newest_firefox" ]; then newest_firefox=${version%%.*}; fi
-  done
-  [ -n "$builds" ] || return 0
   users=$(playwright_build_users "$cache")
+  builds=$(playwright_cache_builds "$cache" "$users")
+  [ -n "$builds" ] || return 0
   unreadable=$(printf '%s\n' "$users" | awk -F'|' -v home="$HOME" '
     $1 == "unreadable" { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
     END { print out }')
+  unknown=$(printf '%s\n' "$builds" | awk -F'|' '$1 == "unknown" { out = out (out == "" ? "" : ", ") $2 } END { print out }')
+  [ -z "$unknown" ] || finding low playwright-browser-unreadable "The version of these Playwright browser builds in $cache could not be read, so they were not compared with the installed browsers: $unknown." "If no Playwright copy uses them, delete them. Otherwise run npx playwright install, which deletes builds no copy needs."
   while IFS='|' read -r kind build version; do
-    [ -n "$build" ] || continue
-    if [ "$kind" = chromium ]; then
-      label=Chromium newest=$newest_chromium browser="Google Chrome"
+    case "$kind" in chromium | chromium_headless_shell | firefox) ;; *) continue ;; esac
+    if [ "$kind" = firefox ]; then
+      label=Firefox browser=Firefox
+      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 == "firefox" { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
     else
-      label=Firefox newest=$newest_firefox browser=Firefox
+      label=Chromium browser="Google Chrome"
+      [ "$kind" = chromium ] || label="Chromium headless shell"
+      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 ~ /^chromium/ { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
     fi
     # The reference is whichever is newer, the installed browser or the newest cached build.
     reference="the newest build Playwright has here,"
     installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/$browser.app/Contents/Info.plist" CFBundleShortVersionString) || installed=""
     case "${installed%%.*}" in
-      ''|*[!0-9]*) ;;
+      '' | *[!0-9]*) ;;
       *) if [ "${installed%%.*}" -ge "$newest" ]; then newest=${installed%%.*} reference=$browser; fi ;;
     esac
     [ "${version%%.*}" -lt "$newest" ] || continue
@@ -259,9 +300,9 @@ audit_playwright_browsers() {
     if [ -n "$used_by" ]; then
       action="Update or remove the Playwright copies that use it: $used_by. Playwright deletes a build once no copy needs it."
     elif [ -n "$unreadable" ]; then
-      action="Which copies use it is unknown, since these copies' browser lists could not be read: $unreadable. Update them; Playwright deletes a build once no copy needs it."
+      action="Which copies use it is unknown, since these copies could not be read: $unreadable. After updating them, npx playwright install deletes builds no copy needs."
     else
-      action="No installed copy of Playwright uses it. The next playwright install deletes it, or delete $cache/$build."
+      action="No installed copy of Playwright uses it: rm -r '$cache/$build'"
     fi
     finding medium stale-playwright-browser "Playwright's $label $version ($build) is older than $reference $newest, so it lacks the security fixes released since." "$action"
   done <<EOF
