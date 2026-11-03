@@ -15,10 +15,21 @@ These never write, prompt, or raise a dialog. Call them freely, and prefer them 
 mac-secure status --json    # settings, jobs, each module's last result
 mac-secure audit --json     # findings, most severe first: severity, id, finding, action
 mac-secure modules --json   # every module: scope, recommended, enabled, available, summary, disruption
+mac-secure vulns --json     # each critical, high or malware match from the last scan; --all for every severity
 mac-secure logs daily -n 100   # also: enforcer, root
 ```
 
 Report findings with their `action`. For `stale-playwright-browser`, the action names the Playwright copies that keep the old build. Some are cached libraries that a program downloads again when it runs, so ask before removing any. A finding is a lead, not a verdict: `system-extension` and `root-helper` list what exists, and only the user knows whether they use it.
+
+## Vulnerability findings
+
+`audit` gives one `vulnerable-software` finding per location, one `malware-package` finding per malware match, one `lower-vulnerabilities` count, and a `vuln-coverage-gap` for each kind of thing the scan could not check. `mac-secure vulns <location or package> --json` lists the matches behind a finding, each with `fixed_in`, `known_exploited` and `path`.
+
+- Lead with `malware-package`, then matches with `known_exploited: true`.
+- A malware match is a lead until checked: confirm the package at `path` has that name and version and came from the registry the advisory names. Do not run it. If it holds, tell the user to remove it and to change the credentials their account can read; removing it follows "Look before deleting".
+- For other matches, name the update that fixes them: the mac-secure module that updates that tool, the tool's own updater, or the app's vendor. For a runtime or app the user may not use, such as an old Node version, list it and let them decide on removal.
+- `vulns-ignore.txt` hides matches from everyone who reads the results. Add a line only for a match the user reviewed and asked to hide.
+- `vuln-scan-stale` or `vuln-scan-missing` means the results are old or absent. Say so rather than reporting the Mac as clean, and read `mac-secure logs daily`.
 
 ## Changing the Mac
 

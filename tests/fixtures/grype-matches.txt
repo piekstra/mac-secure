@@ -1,0 +1,8 @@
+Critical	CVE-2099-0001	kev	Node.js permission model bypass	fixed	18.99.0,20.99.0	binary	node	18.0.0	/v18.0.0/bin/node
+High	GHSA-aaaa-bbbb-0001	-	A malicious archive can write files outside the target folder	fixed	7.9.9	npm	tar	6.0.0	/v18.0.0/lib/node_modules/npm/node_modules/tar/package.json
+High	GHSA-aaaa-bbbb-0002	-	Command injection in example cli	fixed	2.0.1	npm	@example/cli	2.0.0	/v18.0.0/lib/node_modules/@example/cli/package.json
+Medium	CVE-2099-0002	-	Prototype pollution	not-fixed		npm	minimist	1.0.0	/v18.0.0/lib/node_modules/npm/node_modules/minimist/package.json
+Critical	GHSA-mmmm-0000-0001	-	Malware in example-extension	not-fixed		npm	example-extension	1.0.0	/example.example-extension-1.0.0/package.json
+Critical	GHSA-mmmm-0000-0002	-	Embedded malware in bundled-docs	not-fixed		npm	bundled-docs	0.1.0	/v18.0.0/lib/node_modules/npm/docs/package.json
+Critical	GHSA-mmmm-0000-0003	-	Malicious code in evil-dep (npm)	not-fixed		npm	evil-dep	1.0.1	/v18.0.0/lib/node_modules/some-cli/node_modules/evil-dep/package.json
+

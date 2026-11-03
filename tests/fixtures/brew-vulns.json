@@ -1,0 +1,21 @@
+{
+  "checked": 3,
+  "complete": false,
+  "skipped_formulae": ["skipped-one"],
+  "unscanned_formulae": {"other-tap-formula": "untrusted_tap"},
+  "outdated_without_sbom": [],
+  "findings": [
+    {
+      "formula": "exampled",
+      "version": "1.0.0",
+      "tag": "1.0.0",
+      "repo_url": "https://example.com/exampled",
+      "patched": [],
+      "vulnerabilities": [
+        {"id": "CVE-2099-0100", "severity": "HIGH", "summary": null, "aliases": [], "fixed_versions": ["1.0.1"]},
+        {"id": "CVE-2099-0101", "severity": "CRITICAL", "summary": null, "aliases": [], "fixed_versions": []},
+        {"id": "CVE-2099-0102", "severity": "UNKNOWN", "summary": null, "aliases": [], "fixed_versions": []}
+      ]
+    }
+  ]
+}

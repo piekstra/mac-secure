@@ -14,7 +14,7 @@ FAILED_NAMES=""
 
 STUBBED_TOOLS="brew npm npx rustup rustc cargo cargo-audit gcloud bun uv claude colima limactl launchctl defaults sudo
 softwareupdate installer pmset curl pkgutil spctl shasum open osascript sysadminctl dscl dseditgroup fdesetup csrutil
-sw_vers socketfilterfw nc profiles systemextensionsctl lsof pkill file xattr"
+sw_vers socketfilterfw nc profiles systemextensionsctl lsof pkill file xattr grype syft"
 
 # Usage: stub <tool> [script body]. Every stub records its arguments in $CALLS.
 stub() {
