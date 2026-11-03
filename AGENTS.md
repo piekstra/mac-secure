@@ -11,7 +11,7 @@ Run `make verify` before you call a change done. It is what CI runs.
 - Call `sudo` as `$MS_SUDO`. `PATH` can lead with directories the user can write to. Every `curl` in `root/` starts with `-q`.
 - A password never goes on a command line, where `ps` shows it to every process. See `root/feed-password.exp`.
 - Read a plist value through `ms_plist_value`, or `plist_value` in `root/macos-update`. `plutil` can print its error to stdout, where it reads as the value. There are two because root code sources nothing, so keep them identical. `tests/portable.sh` fails on any other `plutil -extract`.
-- `status`, `audit`, `modules`, and `logs` never write, never call `sudo`, and never run anything that can raise a dialog. An agent may call them freely.
+- `status`, `audit`, `modules`, `vulns`, and `logs` never write, never call `sudo`, and never run anything that can raise a dialog. An agent may call them freely.
 - A job has no one to answer a prompt. Anything that can wait on a dialog is bounded or avoided: no AppleScript app control, no `terminal-notifier`, no `/usr/bin/python3` or `lipo` outside code that already needs Xcode's tools, since those shims raise an install dialog on a Mac without them.
 - Check the output of a tool that reports failure in text. `softwareupdate` can exit 0 while printing "Not enough free disk space", and prints nothing at all when the network is down.
 - A module function returns 0 for ok, 75 for retry next run, and anything else for failed. A check that could not run is 75, never read as a clean result.

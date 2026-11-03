@@ -188,6 +188,128 @@ EOF
   done <"$list"
 }
 
+# Looking inside these can raise a macOS privacy prompt for whatever app runs audit, so a Playwright
+# copy there is reported as unknown rather than read.
+playwright_path_is_protected() {
+  case "$1" in
+    "$HOME/Desktop" | "$HOME/Desktop/"* | "$HOME/Documents" | "$HOME/Documents/"* | "$HOME/Downloads" | "$HOME/Downloads/"* | \
+      "$HOME/Library/Mobile Documents/"* | /Volumes/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Prints "<build folder>|<copy path>|<browser version>" for each build an installed copy of Playwright
+# needs, and "unreadable|<copy path>|" for a copy whose list could not be read. Each file in .links
+# holds the path of one copy, whose browsers.json names each build and its browser version.
+playwright_build_users() {
+  local link path i name revision version found
+  for link in "$1/.links"/*; do
+    [ -f "$link" ] || continue
+    path=$(cat "$link")
+    if playwright_path_is_protected "$path"; then
+      echo "unreadable|$path|"
+      continue
+    fi
+    [ -d "$path" ] || continue
+    i=0 found=0
+    while [ "$i" -lt 100 ] && name=$(ms_plist_value "$path/browsers.json" "browsers.$i.name"); do
+      found=1
+      case "$name" in
+        chromium | chromium-headless-shell | firefox)
+          revision=$(ms_plist_value "$path/browsers.json" "browsers.$i.revision") &&
+            version=$(ms_plist_value "$path/browsers.json" "browsers.$i.browserVersion" || true) &&
+            echo "$(echo "$name" | tr '-' '_')-$revision|$path|$version"
+          ;;
+      esac
+      i=$((i + 1))
+    done
+    [ "$found" -eq 1 ] || echo "unreadable|$path|"
+  done
+}
+
+# Prints "<kind>|<build folder>|<version>" for each build in the cache, and "unknown|<build folder>|"
+# for one whose version could not be read. A headless shell sharing its revision with a full Chromium
+# build is the same browser, so only the full build is listed.
+playwright_cache_builds() {
+  local cache=$1 users=$2 dir build kind plist version
+  for dir in "$cache"/chromium-[0-9]* "$cache"/chromium_headless_shell-[0-9]* "$cache"/firefox-[0-9]*; do
+    [ -d "$dir" ] || continue
+    build=$(basename "$dir")
+    kind=${build%-*}
+    case "$kind" in chromium_headless_shell) [ ! -d "$cache/chromium-${build##*-}" ] || continue ;; esac
+    version=""
+    for plist in "$dir"/chrome-mac*/*.app/Contents/Info.plist "$dir"/firefox/*.app/Contents/Info.plist; do
+      [ -f "$plist" ] || continue
+      version=$(ms_plist_value "$plist" CFBundleShortVersionString) && break
+    done
+    # A headless shell has no app bundle; the copies that use a build record its version.
+    [ -n "$version" ] || version=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" '$1 == b && $3 != "" { print $3; exit }')
+    case "${version%%.*}" in
+      '' | *[!0-9]*) echo "unknown|$build|" ;;
+      *) echo "$kind|$build|$version" ;;
+    esac
+  done
+}
+
+# No package scanner identifies Playwright's own browser builds. One older than the installed
+# browser, or than the newest build Playwright has in the same cache, lacks the security fixes
+# released since. Playwright deletes a build once no installed copy needs it, so the finding names
+# those copies. Both the default cache and PLAYWRIGHT_BROWSERS_PATH are checked, since the daily job
+# and the person's shell may install into different ones.
+audit_playwright_browsers() {
+  local cache=$HOME/Library/Caches/ms-playwright
+  audit_playwright_cache "$cache"
+  case "${PLAYWRIGHT_BROWSERS_PATH:-0}" in
+    0 | "$cache" | "$cache/") ;;
+    *) audit_playwright_cache "${PLAYWRIGHT_BROWSERS_PATH%/}" ;;
+  esac
+}
+
+audit_playwright_cache() {
+  local cache=$1 builds users unreadable unknown kind build version newest label browser reference installed used_by action
+  [ -d "$cache" ] || return 0
+  users=$(playwright_build_users "$cache")
+  builds=$(playwright_cache_builds "$cache" "$users")
+  [ -n "$builds" ] || return 0
+  unreadable=$(printf '%s\n' "$users" | awk -F'|' -v home="$HOME" '
+    $1 == "unreadable" { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
+    END { print out }')
+  unknown=$(printf '%s\n' "$builds" | awk -F'|' '$1 == "unknown" { out = out (out == "" ? "" : ", ") $2 } END { print out }')
+  [ -z "$unknown" ] || finding low playwright-browser-unreadable "The version of these Playwright browser builds in $cache could not be read, so they were not compared with the installed browsers: $unknown." "If no Playwright copy uses them, delete them. Otherwise run npx playwright install, which deletes builds no copy needs."
+  while IFS='|' read -r kind build version; do
+    case "$kind" in chromium | chromium_headless_shell | firefox) ;; *) continue ;; esac
+    if [ "$kind" = firefox ]; then
+      label=Firefox browser=Firefox
+      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 == "firefox" { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
+    else
+      label=Chromium browser="Google Chrome"
+      [ "$kind" = chromium ] || label="Chromium headless shell"
+      newest=$(printf '%s\n' "$builds" | awk -F'|' '$1 ~ /^chromium/ { v = $3 + 0; if (v > m) m = v } END { print m + 0 }')
+    fi
+    # The reference is whichever is newer, the installed browser or the newest cached build.
+    reference="the newest build Playwright has here,"
+    installed=$(ms_plist_value "$MS_APPLICATIONS_DIR/$browser.app/Contents/Info.plist" CFBundleShortVersionString) || installed=""
+    case "${installed%%.*}" in
+      '' | *[!0-9]*) ;;
+      *) if [ "${installed%%.*}" -ge "$newest" ]; then newest=${installed%%.*} reference=$browser; fi ;;
+    esac
+    [ "${version%%.*}" -lt "$newest" ] || continue
+    used_by=$(printf '%s\n' "$users" | awk -F'|' -v b="$build" -v home="$HOME" '
+      $1 == b { p = index($2, home "/") == 1 ? "~" substr($2, length(home) + 1) : $2; out = out (out == "" ? "" : ", ") p }
+      END { print out }')
+    if [ -n "$used_by" ]; then
+      action="Update or remove the Playwright copies that use it: $used_by. Playwright deletes a build once no copy needs it."
+    elif [ -n "$unreadable" ]; then
+      action="Which copies use it is unknown, since these copies could not be read: $unreadable. After updating them, npx playwright install deletes builds no copy needs."
+    else
+      action="No installed copy of Playwright uses it: rm -r '$cache/$build'"
+    fi
+    finding medium stale-playwright-browser "Playwright's $label $version ($build) is older than $reference $newest, so it lacks the security fixes released since." "$action"
+  done <<EOF
+$builds
+EOF
+}
+
 audit_homebrew() {
   command -v brew >/dev/null 2>&1 || return 0
   local formulae casks
@@ -196,6 +318,87 @@ audit_homebrew() {
   if [ "$formulae" -gt 0 ] || [ "$casks" -gt 0 ]; then
     finding medium homebrew-outdated "Homebrew outdated: $formulae formulae and $casks casks, as of its last update." "mac-secure enable brew-formulae brew-casks"
   fi
+}
+
+# One finding per scanned location with critical or high matches, and one per malware match.
+# With the module off, earlier results are not reported: nothing refreshes them, so they would read
+# as current.
+audit_vulns() {
+  local age what action
+  if ! ms_user_enabled vulns; then
+    finding low vuln-scan-off "Installed tools, packages and apps are not checked for known vulnerabilities." "brew install grype syft; mac-secure enable vulns"
+    return 0
+  fi
+  if ! ms_module_available vulns; then
+    finding medium vuln-scan-missing "The vulns module is on, but $(ms_module_missing_tool vulns) is not installed, so nothing is scanned." "brew install grype syft"
+    return 0
+  fi
+  if [ ! -f "$MS_VULN_RESULTS" ]; then
+    finding medium vuln-scan-missing "The vulns module is on, but no scan has finished." "mac-secure run vulns, then: mac-secure logs daily"
+    return 0
+  fi
+  if [ -f "$MS_VULN_GAPS" ]; then
+    while IFS=$'\t' read -r what action; do
+      [ -z "$what" ] || finding low vuln-coverage-gap "$what" "$action"
+    done <"$MS_VULN_GAPS"
+  fi
+  if ! age=$(ms_vuln_scan_age_days); then
+    finding medium vuln-scan-stale "No vulnerability scan has finished every location, so some may not have been checked." "mac-secure logs daily, or: mac-secure run vulns"
+  elif [ "$age" -gt "$MS_VULN_STALE_DAYS" ]; then
+    finding medium vuln-scan-stale "The last complete vulnerability scan is $age days old, so newer advisories are not reflected." "mac-secure logs daily, or: mac-secure run vulns"
+  fi
+  ms_vulns_effective | awk -F'\t' -v home="$HOME" '
+    function show(p) { return index(p, home "/") == 1 ? "~" substr(p, length(home) + 1) : p }
+    function label(t) { return t == "homebrew" ? "Homebrew formulae" : show(t) }
+    function count_of(n, one, many) { return n " " (n == 1 ? one : many) }
+    # What to update or remove: the first directory or file under the location, or the first two
+    # when the first only groups others, such as bin, share or Versions. A formula for Homebrew.
+    function unit(t, path, name,    rel, n, parts) {
+      if (t == "homebrew") return name
+      rel = substr(path, length(t) + 2)
+      n = split(rel, parts, "/")
+      if (n >= 2 && parts[1] ~ /^(bin|lib|libexec|share|Versions|node_modules|pipx|venvs|tools)$/) return parts[1] "/" parts[2]
+      return parts[1]
+    }
+    $5 == "malware" {
+      if (!(($3, $11) in seen)) {
+        seen[$3, $11] = 1
+        printf "high\tmalware-package\t%s %s at %s matches malware advisory %s.\tCheck that the advisory applies to this copy. If it does, remove it and change the credentials your account can read.\n", $9, $10, show($11), $3
+      }
+      next
+    }
+    $2 != "Critical" && $2 != "High" { if (!($1 in quiet)) { quiet[$1] = 1; nquiet++ } if (!(($3, $9, $10) in lowseen)) { lowseen[$3, $9, $10] = 1; lower++ } next }
+    {
+      t = $1; pkg = $9 " " $10; part = unit(t, $11, $9)
+      if (!(t in vulns)) order[++nt] = t
+      # A vulnerability counts once per package version, however many copies of it are installed.
+      if (!((t, $3, pkg) in seen_vuln)) { seen_vuln[t, $3, pkg] = 1; vulns[t]++ }
+      if (!((t, pkg) in seen_pkg)) { seen_pkg[t, pkg] = 1; npkg[t]++ }
+      if (!((t, part) in per)) units[t, ++nunits[t]] = part
+      if (!((t, part, $3, pkg) in seen_unit)) { seen_unit[t, part, $3, pkg] = 1; per[t, part]++ }
+      if ($4 == "kev" && !((t, $3) in kevseen)) { kevseen[t, $3] = 1; if (++nkev[t] <= 2) kevids[t] = kevids[t] (nkev[t] > 1 ? ", " : "") $3 }
+      if ($2 == "Critical" && $6 == "fixed") fixable[t]++
+    }
+    END {
+      for (i = 1; i <= nt; i++) {
+        t = order[i]; top = ""
+        for (k = 1; k <= 3; k++) {
+          best = ""; most = 0
+          for (j = 1; j <= nunits[t]; j++) { u = units[t, j]; if (per[t, u] > most && !((t, u) in used)) { best = u; most = per[t, u] } }
+          if (best == "") break
+          used[t, best] = 1
+          top = top (top == "" ? "" : ", ") best " (" most ")"
+        }
+        what = sprintf("%s: %s in %s", label(t), count_of(vulns[t], "critical or high vulnerability", "critical or high vulnerabilities"),
+          count_of(npkg[t], "package", "packages"))
+        if (nkev[t] > 0) what = what sprintf(", %d known to be exploited (%s%s)", nkev[t], kevids[t], nkev[t] > 2 ? ", ..." : "")
+        printf "%s\tvulnerable-software\t%s. Most affected: %s.\tmac-secure vulns %s lists each one and the version that fixes it. Update what you use and remove what you do not.\n",
+          (nkev[t] > 0 || fixable[t] > 0) ? "high" : "medium", what, top, (t == "homebrew" ? "homebrew" : show(t))
+      }
+      if (lower > 0) printf "info\tlower-vulnerabilities\t%s in %s.\tmac-secure vulns --all\n",
+        count_of(lower, "medium, low or unscored vulnerability", "medium, low or unscored vulnerabilities"), count_of(nquiet, "location", "locations")
+    }
+  ' >>"$MS_AUDIT_OUT"
 }
 
 ms_audit_collect() {
@@ -211,7 +414,9 @@ ms_audit_collect() {
   audit_apps
   audit_listeners
   audit_stale_browsers
+  audit_playwright_browsers
   audit_homebrew
+  audit_vulns
 }
 
 # Most severe first.

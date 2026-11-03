@@ -14,7 +14,7 @@ FAILED_NAMES=""
 
 STUBBED_TOOLS="brew npm npx rustup rustc cargo cargo-audit gcloud bun uv claude colima limactl launchctl defaults sudo
 softwareupdate installer pmset curl pkgutil spctl shasum open osascript sysadminctl dscl dseditgroup fdesetup csrutil
-sw_vers socketfilterfw nc profiles systemextensionsctl lsof pkill file xattr"
+sw_vers socketfilterfw nc profiles systemextensionsctl lsof pkill file xattr grype syft"
 
 # Usage: stub <tool> [script body]. Every stub records its arguments in $CALLS.
 stub() {
@@ -31,7 +31,7 @@ sandbox() {
   export HOME="$TMP/home"
   mkdir -p "$HOME"
   # Tools that find their data from the environment rather than HOME would reach the real system.
-  unset NVM_DIR
+  unset NVM_DIR PLAYWRIGHT_BROWSERS_PATH
   STUBS="$TMP/stubs"
   mkdir -p "$STUBS"
   export CALLS="$TMP/calls"

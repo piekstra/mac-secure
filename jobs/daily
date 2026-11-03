@@ -12,6 +12,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/lib/common.sh"
 # shellcheck source=lib/modules.sh
 . "$ROOT/lib/modules.sh"
+# shellcheck source=lib/vulns.sh
+. "$ROOT/lib/vulns.sh"
 
 PATH=$(ms_tool_path)
 export PATH
@@ -561,6 +563,171 @@ for line in sys.stdin:
   return 0
 }
 
+# The fields kept from each grype match, one line per place the package was found: the layout of
+# lib/vulns.sh without the location, with the start of the advisory's description in place of the
+# malware flag, and with the path relative to the scanned directory.
+vuln_template() {
+  printf '%s\t' '{{- range $m := .Matches}}{{range $l := $m.Artifact.Locations}}{{$m.Vulnerability.Severity}}' \
+    '{{$m.Vulnerability.ID}}' '{{if $m.Vulnerability.KnownExploited}}kev{{else}}-{{end}}' \
+    '{{$m.Vulnerability.Description | replace "\t" " " | replace "\r" " " | replace "\n" " " | trunc 60}}' \
+    '{{$m.Vulnerability.Fix.State}}' '{{join "," $m.Vulnerability.Fix.Versions}}' \
+    '{{$m.Artifact.Type}}' '{{$m.Artifact.Name}}' '{{$m.Artifact.Version}}'
+  printf '%s\n%s\n' '{{$l.RealPath}}' '{{end}}{{end}}'
+}
+
+# Prints the target's matches in the results layout. Prints nothing unless both tools succeed.
+scan_vuln_target() {
+  local target=$1 work=$2
+  # syft's installed-package catalogers, rather than the directory default, so packages installed
+  # without a lockfile (npm globals among them) are seen and a lockfile's unused entries are not.
+  # The empty config keeps a user's grype or syft settings, such as fail-on-severity or ignore
+  # rules, from failing the scan or hiding matches.
+  syft scan "dir:$target" -c "$work/empty.yaml" --override-default-catalogers image -o "syft-json=$work/sbom.json" -q || return 1
+  grype "sbom:$work/sbom.json" -c "$work/empty.yaml" -o template -t "$work/vulns.tmpl" -q >"$work/matches.txt" || return 1
+  # npm installs a package at node_modules/<name>/package.json. Any other package.json is a project's,
+  # an editor extension's or a bundled subfolder's own manifest, and malware advisories often take
+  # those names, so matching one would be a false alarm. GitHub words a malware advisory's
+  # description as "Malware in", "Malicious code in", "Malicious package in" or "Embedded malware in".
+  # The description is cut at a byte count, which can split a character, so awk reads bytes.
+  LC_ALL=C awk -F'\t' -v OFS='\t' -v t="$target" '
+    NF < 10 { next }
+    $7 == "npm" && t $10 !~ /\/node_modules\/(@[^\/]+\/)?[^\/]+\/package\.json$/ { next }
+    {
+      malware = tolower($4) ~ /^(embedded )?(malware|malicious (code|package)) in / ? "malware" : "-"
+      print t, $1, $2, $3, malware, $5, $6, $7, $8, $9, t $10
+    }
+  ' "$work/matches.txt"
+}
+
+# brew vulns exits 1 for a finding and for an error alike, so the report decides. Homebrew needs the
+# Command Line Tools, so this python3 is never the shim that asks to install them.
+scan_vuln_homebrew() {
+  local work=$1 prefix
+  prefix=$(brew --prefix) || return 1
+  brew vulns --json >"$work/brew.json" 2>"$work/brew.err"
+  if ! /usr/bin/python3 -I -c '
+import json, sys
+try:
+    report = json.load(open(sys.argv[1]))
+    findings = report["findings"]
+except (ValueError, KeyError, OSError):
+    sys.exit(3)
+names = {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium", "MODERATE": "Medium", "LOW": "Low"}
+lines = []
+for found in findings:
+    path = "%s/opt/%s" % (sys.argv[2], found["formula"])
+    for vuln in found.get("vulnerabilities", []):
+        fixed = vuln.get("fixed_versions") or []
+        lines.append("\t".join(["homebrew", names.get(str(vuln.get("severity")).upper(), "Unknown"), vuln["id"], "-", "-",
+                                "fixed" if fixed else "not-fixed", ",".join(fixed), "brew", found["formula"],
+                                str(found.get("version", "")), path]))
+checked = report.get("checked", 0)
+skipped = report.get("skipped_formulae") or []
+unscanned = report.get("unscanned_formulae") or {}
+stale = report.get("outdated_without_sbom") or []
+with open(sys.argv[3], "w") as out:
+    out.write("homebrew: %s formulae checked, %d skipped for lack of a supported source URL, %d not checked, %d checked at the current formula version\n"
+              % (len(checked) if isinstance(checked, list) else checked, len(skipped), len(unscanned), len(stale)))
+# Gaps that persist from run to run are reported by audit rather than retried, so they do not keep
+# the scan from ever completing.
+gaps = []
+if stale:
+    gaps.append(("brew vulns checked the current formula, not the installed version, of %s: they are out of date and have no install-time record."
+                 % ", ".join(stale), "brew upgrade %s" % " ".join(stale)))
+if unscanned:
+    gaps.append(("brew vulns could not check %s." % ", ".join("%s (%s)" % item for item in sorted(unscanned.items())),
+                 "For an untrusted tap, brew trust it if you trust it. Otherwise: brew doctor"))
+if skipped:
+    gaps.append(("%d Homebrew formulae have no source URL brew vulns supports, so they were not checked." % len(skipped),
+                 "Nothing to do here. brew-formulae still keeps them updated."))
+with open(sys.argv[5], "w") as out:
+    out.write("".join("%s\t%s\n" % gap for gap in gaps))
+with open(sys.argv[4], "w") as out:
+    out.write("\n".join(lines) + ("\n" if lines else ""))
+' "$work/brew.json" "$prefix" "$work/coverage.txt" "$work/brew.tsv" "$work/gaps.tsv"; then
+    cat "$work/brew.err" >&2
+    return 1
+  fi
+  cat "$work/brew.tsv"
+}
+
+ch_vulns() {
+  ensure_space || { detail "low disk: $(ms_free_gib) GiB"; return 75; }
+  local target scanned=0 failed="" before after new counts coverage extra help
+  export GRYPE_CHECK_FOR_APP_UPDATE=false SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_DB_AUTO_UPDATE=false
+  # Not local: the trap runs when the module's subshell exits. bash skips an EXIT trap when a signal
+  # kills it, so the time limit's TERM is turned into an exit.
+  VULN_WORK=$(mktemp -d "${TMPDIR:-/tmp}/mac-secure-vulns.XXXXXX")
+  trap 'rm -rf "$VULN_WORK"' EXIT
+  trap 'exit 143' TERM
+  local work=$VULN_WORK
+  printf '{}\n' >"$work/empty.yaml"
+  # On a failed update grype keeps the database it has, and refuses to scan once that is too old. The
+  # scan goes on, but is not stamped complete, so audit reports advisories going unmatched.
+  grype db update -c "$work/empty.yaml" || failed=" database-update"
+  mkdir -p "$MS_VULN_DIR"
+  vuln_template >"$work/vulns.tmpl"
+  : >"$work/latest.tsv"
+  : >"$work/coverage.txt"
+  : >"$work/gaps.tsv"
+  extra=$(ms_vuln_extra_targets)
+  # A location that could not be scanned keeps its previous results, so a failed scan never reads as clean.
+  while IFS= read -r target; do
+    if [ ! -d "$target" ]; then
+      printf '%s\n' "$extra" | grep -qxF "$target" || continue
+      failed="$failed $target"
+      awk -F'\t' -v t="$target" '$1 == t && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+      continue
+    fi
+    if scan_vuln_target "$target" "$work" >>"$work/latest.tsv"; then
+      scanned=$((scanned + 1))
+    else
+      failed="$failed $target"
+      awk -F'\t' -v t="$target" '$1 == t && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+    fi
+  done <<EOF
+$(ms_vuln_targets)
+EOF
+  # A Homebrew without the command cannot check formulae, a gap to report rather than a failure to
+  # retry. Only brew's own "Unknown command" says so: any other error, such as an offline Homebrew
+  # that cannot set up its Ruby, is a check that could not run.
+  if command -v brew >/dev/null 2>&1 && [ "$(ms_config_get VULN_HOMEBREW yes)" != no ]; then
+    if ! help=$(brew vulns --help 2>&1 >/dev/null) && printf '%s' "$help" | grep -q 'Unknown command'; then
+      echo "homebrew: this Homebrew has no brew vulns" >"$work/coverage.txt"
+      printf '%s\t%s\n' "This Homebrew has no brew vulns, so formulae were not checked." "brew update" >"$work/gaps.tsv"
+    elif scan_vuln_homebrew "$work" >>"$work/latest.tsv"; then
+      scanned=$((scanned + 1))
+    else
+      failed="$failed homebrew"
+      awk -F'\t' '$1 == "homebrew" && NF == 11' "$MS_VULN_RESULTS" 2>/dev/null >>"$work/latest.tsv"
+      cp "$MS_VULN_GAPS" "$work/gaps.tsv" 2>/dev/null
+    fi
+  fi
+  before=$(ms_vuln_urgent_keys)
+  mv -f "$work/latest.tsv" "$MS_VULN_RESULTS"
+  mv -f "$work/coverage.txt" "$MS_VULN_COVERAGE"
+  mv -f "$work/gaps.tsv" "$MS_VULN_GAPS"
+  # The stamp marks the last complete scan, so repeated partial failures surface as a stale scan.
+  [ -n "$failed" ] || date +%s >"$MS_VULN_STAMP"
+  after=$(ms_vuln_urgent_keys)
+  new=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | grep -c .)
+  if [ "$new" -gt 0 ]; then
+    ms_notify "mac-secure: new vulnerabilities" "$new new critical, known-exploited or malware findings. Run: mac-secure audit"
+  fi
+  # Each vulnerability counts once per package version, however many copies are installed.
+  counts=$(ms_vulns_effective | awk -F'\t' '
+    ($3, $9, $10) in seen { next }
+    { seen[$3, $9, $10] = 1 }
+    $2 == "Critical" || $2 == "High" { severe++ }
+    $4 == "kev" { kev++ }
+    $5 == "malware" { malware++ }
+    END { printf "%d critical or high, %d known exploited, %d malware", severe, kev, malware }')
+  coverage=$(tr '\n' ' ' <"$MS_VULN_COVERAGE" | sed 's/ *$//')
+  detail "scanned $scanned locations: $counts; ${coverage:+$coverage; }failed:${failed:- none}"
+  [ -z "$failed" ] || return 75
+  return 0
+}
+
 module_limit_seconds() {
   [ -z "${MS_MODULE_LIMIT:-}" ] || { echo "$MS_MODULE_LIMIT"; return; }
   case $1 in
@@ -576,7 +743,7 @@ run_module() {
   local name=$1 fn started rc result elapsed limit pid watchdog tool
   fn="ch_$(echo "$name" | tr '-' '_')"
   if [ "$name" != disk ] && ! ms_module_available "$name"; then
-    tool=$(ms_module_field "$name" 3)
+    tool=$(ms_module_missing_tool "$name")
     printf '%s\t%s\tskipped\t0\t%s not installed\n' "$(date '+%Y-%m-%d %H:%M')" "$name" "$tool" >>"$RUN_TSV"
     return 0
   fi

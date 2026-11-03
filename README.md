@@ -25,6 +25,7 @@ mac-secure enable --recommended
 | `status [--json]` | Security settings, jobs, each module's last result. Read-only. |
 | `audit [--json]` | Findings about this Mac, most severe first. Read-only. |
 | `modules [--json]` | Every module, what it does and what it can disrupt. Read-only. |
+| `vulns [filter] [--all] [--json]` | Each known vulnerability from the last scan: critical, high and malware, or every severity with `--all`. The filter matches a location, path or package. Read-only. |
 | `logs [daily\|enforcer\|root] [-n <lines>]` | The newest log. Read-only. |
 | `enable <module>... \| --recommended [--yes]` | Turns modules on and installs their jobs. |
 | `disable <module>... [--yes]` | Turns modules off. Settings the module applied stay as they are. |
@@ -51,6 +52,7 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `playwright` | you | yes | Keeps the Playwright copies you already use, and their browsers, current | Removes cached npx copies that no running process uses |
 | `claude-code` | you | yes | Updates Claude Code | None |
 | `colima` | you | no | Patches Ubuntu and Docker in running Colima VMs | Restarts Docker and VMs; waits while a CI job is running |
+| `vulns` | you | yes | Scans installed tools, packages, editor extensions and apps for known vulnerabilities and malware, and notifies you of new ones | None. Its database takes about 3 GB of disk, and each daily update downloads about 200 MB |
 | `browsers` | you | yes | Restarts browsers that run old code after an update | Closes the browser 30 minutes after a warning; stops stale automation profiles without a restart |
 | `macos` | root | yes | Keeps macOS auto-update settings on, installs updates that need no restart, downloads the rest | Safari closes when it updates; macOS's own automatic install can restart the Mac overnight |
 | `macos-unattended` | root | no | Installs restart-required macOS updates by itself at the scheduled hour | Creates a hidden admin account with a stored random password; restarts the Mac after a 5-minute warning |
@@ -58,6 +60,8 @@ Exit status: 0 done, 1 a module failed, 2 usage error or refused request, 3 a ro
 | `app-store` | root | yes | Keeps App Store auto-updates on | Apps can close when they update |
 | `firewall` | root | yes | Keeps the macOS firewall on | An unsigned program that listens beyond this Mac raises an allow dialog |
 | `vendor-installers` | root | no | Keeps the pkg-based apps in `vendor-installers.txt` current | An app can close when its installer runs |
+
+`audit` also reports a Playwright browser build older than the browser installed on the Mac, or than the newest build Playwright has there, with the copies of Playwright that keep it. It checks `~/Library/Caches/ms-playwright` and, when set in the environment of whoever runs `audit`, the folder `PLAYWRIGHT_BROWSERS_PATH` names. A copy under Desktop, Documents, Downloads, iCloud Drive or `/Volumes` is not read, since that can raise a privacy prompt, so the finding says which copies use such a build is unknown. Playwright [deletes a build](https://playwright.dev/docs/browsers#stale-browser-removal) once no installed copy needs it.
 
 A module whose tool is not installed is skipped until the tool appears, so enabling one you do not use costs nothing.
 
@@ -86,8 +90,33 @@ Everything personal lives in `~/.config/mac-secure/`:
 | `adopt-apps.txt` | Apps for `adopt-apps` | `config/adopt-apps.example` |
 | `vendor-installers.txt` | Casks and pinned signing teams for `vendor-installers` | `config/vendor-installers.example` |
 | `restart-apps.txt` | Apps the enforcer restarts, replacing the default browser list | `config/restart-apps.default` |
+| `vulns-ignore.txt` | Matches you reviewed and want left out of `audit` and `vulns` | `config/vulns-ignore.example` |
 
 `config` is read as `KEY=value` text and is never sourced, so a shell does not interpret a value. Two keys, `CARGO_LOCAL_SIGN_COMMAND` and `PLAYWRIGHT_PYTHON`, name a program the daily job runs as you. After changing a schedule or a root-side list, run `mac-secure refresh`.
+
+## Vulnerability scanning
+
+The `vulns` module needs [grype](https://github.com/anchore/grype) and [syft](https://github.com/anchore/syft): `brew install grype syft`. syft lists what is installed, and grype matches it against Anchore's database, which includes GitHub's advisories (malware advisories among them), the NVD, and CISA's list of vulnerabilities known to be exploited. When Homebrew has `brew vulns`, it checks the installed formulae as well; `audit` says when it does not.
+
+grype matches what is installed against the database it downloads from Anchore, on the Mac. `brew vulns` instead sends each formula's package name and version to [OSV.dev](https://google.github.io/osv.dev/api/) (`api.osv.dev`), which can name a formula from a private tap. `VULN_HOMEBREW=no` in `config` leaves formulae out.
+
+It runs in the daily job after the update modules, so its results describe what the updates left behind. It scans these locations when they exist: Node versions from nvm, Volta and fnm; the npx cache; Bun's global packages; `~/.local`; `~/go/bin`; `~/.cargo/bin`; Playwright's Go drivers; VS Code and Cursor extensions; `~/.claude/plugins`; python.org's Python framework; `/Applications`; and Homebrew's `lib`. `VULN_SCAN_PATHS` in `config` adds more.
+
+The scan reads what is installed: package manifests under `node_modules`, Python package metadata, the build information in Go and Rust binaries, app bundles, and known binaries such as `node` and `python`. It does not read lockfiles, so a cloned repository's dependencies count only once they are installed. npm installs a package at `node_modules/<name>/package.json`, and any other `package.json` (an editor extension's or a project's own) is left out, because malware advisories often reuse those names.
+
+How you learn about results:
+
+- A notification when a scan finds a critical, known-exploited or malware match that the previous scan did not have.
+- `audit` lists one finding per location with critical or high matches (`vulnerable-software`), one per malware match (`malware-package`), and one counting the lower-severity matches that `mac-secure vulns --all` lists (`lower-vulnerabilities`). It also reports what the scan could not check (`vuln-coverage-gap`), a scan that has not finished in 3 days or a failed database update (`vuln-scan-stale`), a missing tool or result (`vuln-scan-missing`), and a module that is off (`vuln-scan-off`). With the module off, earlier results are not reported, since nothing updates them.
+- `mac-secure vulns` lists each match with the version that fixes it, and `--json` gives the same to a script or an agent.
+
+A location that cannot be scanned keeps its previous results, and the module reports `deferred`, so a failed scan never reads as a clean one. So does a `VULN_SCAN_PATHS` location that is missing, such as an unmounted volume. A failed database update leaves the scan unstamped, so `audit` reports it after 3 days.
+
+`mac-secure disable vulns` keeps the results and grype's database. `uninstall --purge` removes the results; `grype db delete` removes the database.
+
+A match is a lead, not a verdict. To leave out one you reviewed, add a line to `vulns-ignore.txt`: the advisory id alone, or the id, a part of the path, and why, separated by `|`.
+
+Not covered: Playwright's browser builds, which no scanner here identifies; container images; project checkouts, unless added with `VULN_SCAN_PATHS`; Homebrew casks, which `brew vulns` does not check; and formulae `brew vulns` skips for lack of a supported source URL, which the module's result counts.
 
 ## Trust model
 
@@ -131,6 +160,8 @@ Pull requests run on Linux only. The macOS job runs on `main` and on manual runs
 - On Intel, the test suite, `status`, and `audit` pass on a `macos-15-intel` CI runner. No vendor package has been installed on an Intel Mac.
 - Not verified: `RelaunchNotification` policy on Edge and Brave. It is the same Chromium policy as Chrome.
 - Without root, `audit` sees only the current user's listening processes.
+- With `PLAYWRIGHT_BROWSERS_PATH=0`, each copy of Playwright keeps its browsers in its own `node_modules`, which `audit` does not check.
+- `vulns` matches an app by the packages and binaries inside it. A vulnerability in an app's own code is reported only when the database names that app, so an app with no match is not proven clean.
 - `kMDItemLastUsedDate` is unreliable after an app is reinstalled, so `audit` makes no claim about when an app was last used.
 
 ## License

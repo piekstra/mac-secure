@@ -1,0 +1,6 @@
+# Copy to ~/.config/mac-secure/vulns-ignore.txt. One reviewed match per line, left out of audit and
+# mac-secure vulns. Either the advisory id alone, which hides it everywhere, or the id, a part of the
+# path it was found at, and why, separated by |.
+#
+#GHSA-xxxx-xxxx-xxxx
+#CVE-2000-0000|/Applications/Example.app|The vendor says the affected code is not reachable.

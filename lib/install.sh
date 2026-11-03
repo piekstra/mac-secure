@@ -22,7 +22,7 @@ ms_install_app_copy() {
   local new="$MS_APP_DIR.new" old="$MS_APP_DIR.old"
   rm -rf "$new" "$old"
   mkdir -p "$new/lib" "$new/jobs" "$new/config"
-  cp "$ROOT/lib/common.sh" "$ROOT/lib/modules.sh" "$new/lib/"
+  cp "$ROOT/lib/common.sh" "$ROOT/lib/modules.sh" "$ROOT/lib/vulns.sh" "$new/lib/"
   cp "$ROOT/jobs/daily" "$ROOT/jobs/enforcer" "$new/jobs/"
   cp "$ROOT/config/restart-apps.default" "$new/config/"
   chmod 755 "$new/jobs/daily" "$new/jobs/enforcer"
