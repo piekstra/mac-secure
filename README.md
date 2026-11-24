@@ -184,4 +184,5 @@ Pull requests run on Linux only. The macOS job runs on `main` and on manual runs
 
 ## License
 
-MIT
+Copyright (C) 2026 Caleb Piekstra. Licensed under the GNU Affero General Public
+License, version 3 only (AGPL-3.0-only); see [LICENSE](LICENSE).
